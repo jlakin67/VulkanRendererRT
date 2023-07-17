@@ -1,0 +1,62 @@
+#version 460 core
+#extension GL_EXT_mesh_shader : require
+
+//layout( local_size_x_id=0 ) in;
+
+layout( local_size_x = 1, local_size_y = 1, local_size_z = 1 ) in;
+layout(triangles, max_vertices = 64, max_primitives = 126) out;
+
+layout (std140, set = 0, binding = 0) uniform Transforms { 
+  mat4 view;
+  mat4 projection;
+} transforms;
+
+layout (std140, set = 1, binding = 0) readonly buffer Instances { 
+  mat4 models[];
+} instances;
+
+struct Vertex {
+  vec4 position;
+};
+
+layout (std430, set = 1, binding = 1) readonly buffer VertexBuffer {
+  Vertex vertices[];
+} vertexBuffer;
+
+struct Meshlet
+{
+  uint vertices[64];
+  uint indices[378]; // up to 126 triangles
+  uint vertexCount;
+  uint indexCount;
+};
+
+layout (std430, set = 1, binding = 2) readonly buffer MeshletBuffer
+{
+  Meshlet meshlets[];
+} meshletBuffer;
+
+layout (location = 0) out PerVertexData
+{
+  vec3 pos;
+} v_out[];   // [max_vertices]
+
+void main() {
+	uint instanceID = gl_GlobalInvocationID.y; //the y axis used for instances
+	mat4 model = instances.models[instanceID];
+	uint meshletID = gl_GlobalInvocationID.x;
+	Meshlet meshlet = meshletBuffer.meshlets[meshletID];
+	uint primitiveCount = meshlet.indexCount / 3;
+	SetMeshOutputsEXT(meshlet.vertexCount, primitiveCount);
+	for (uint i = 0; i < meshlet.vertexCount; i++) {
+		uint vertexIndex = meshlet.vertices[i];
+		vec4 worldPos = model * vertexBuffer.vertices[vertexIndex].position;
+		v_out[i].pos = worldPos.xyz;
+		gl_MeshVerticesEXT[i].gl_Position = transforms.projection * transforms.view * worldPos;
+	}
+	for (uint i = 0; i < primitiveCount; i++) {
+		uvec3 triangleIndices = uvec3(meshlet.indices[3*i], meshlet.indices[3*i+1], meshlet.indices[3*i+2]);
+		gl_PrimitiveTriangleIndicesEXT[i] = triangleIndices;
+	}
+}
+
