@@ -6,6 +6,7 @@ JobManager jobManager;
 IOThread ioThread;
 UIState uiState{};
 Camera camera;
+EntityManager entityManager;
 VulkanRenderer renderer{ jobManager, ioThread };
 
 int main() {
@@ -30,7 +31,7 @@ int main() {
         processKeyboard(window, camera, deltaTime, uiState); //updates camera and window objects
 
         //command building and swapchain acquisition, queue submission, and presentation happens here
-        renderer.render(window, camera, uiState);
+        renderer.render(window, camera, uiState, entityManager);
 
         double currentTime = glfwGetTime();
         deltaTime = currentTime - previousTime; //measures time taken to process and submit work for a frame to be shown

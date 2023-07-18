@@ -6,6 +6,7 @@
 #include "job_system.h"
 #include "rendering_util.h"
 #include <imgui.h>
+#include "scene.h"
 
 enum RenderPassNames {
 	RenderPass_Default, //just one subpass with swapchain color attachment and depth-stencil attachment only
@@ -102,7 +103,7 @@ public:
 	}
 
 	void startUp(GLFWwindow* window);
-	void render(GLFWwindow* window, Camera& camera, UIState& uiState);
+	void render(GLFWwindow* window, Camera& camera, UIState& uiState, EntityManager& entityManager);
 	void wait() { if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device); }
 	void shutDown(); //control destruction order explicitly
 private:

@@ -147,7 +147,7 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	initTransforms();
 }
 
-void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState) {
+void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState, EntityManager& entityManager) {
 	vkWaitForFences(device, 1, &frameQueueFences[currentFrame], VK_TRUE, UINT64_MAX);
 	VK_CHECK(vkResetFences(device, 1, &frameQueueFences[currentFrame]));
 	uint32_t swapchainImageIndex = 0;
@@ -257,13 +257,12 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	VkRect2D scissor{};
 	scissor.extent = swapchain.extent;
 	vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayouts[Graphics_Default],
+		0, 1, &transformsDescriptorSets[currentFrame], 0, nullptr);
 	for (auto& pair : meshes) {
 		Mesh* mesh = pair.second;
-		VkDescriptorSet bindDescriptorSets[2];
-		bindDescriptorSets[0] = transformsDescriptorSets[currentFrame];
-		bindDescriptorSets[1] = mesh->descriptorSet[currentFrame];
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayouts[Graphics_Default],
-			0, 2, bindDescriptorSets, 0, nullptr);
+			1, 1, &(mesh->descriptorSet[currentFrame]), 0, nullptr);
 		 vkCmdDrawMeshTasks(commandBuffer, mesh->numMeshlets, mesh->numInstances, 1);
 	}
 	vkCmdEndRenderPass(commandBuffer);
