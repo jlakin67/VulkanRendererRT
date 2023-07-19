@@ -34,6 +34,8 @@ const float Z_NEAR = 0.1f;
 const float Z_FAR = 100.0f;
 const float INIT_ASPECT_RATIO = (float)INIT_SCR_WIDTH / (float)INIT_SCR_HEIGHT;
 
+constexpr const float PI = 3.14159265358979323846f;
+constexpr const float TWO_PI = 2.0f * PI;
 constexpr float CAMERA_FOV_Y = 45.0f;
 constexpr double CAMERA_SENSITIVITY = 0.8;
 constexpr double CAMERA_SPEED = 8.0f;
@@ -47,4 +49,4 @@ constexpr uint32_t MAX_MESH_INSTANCES = 5000;
 constexpr uint32_t MESHLET_MAX_VERTICES = 32;
 constexpr uint32_t MESHLET_MAX_INDICES = MESHLET_MAX_VERTICES * 3;
 
-constexpr uint32_t MODELS_PER_ALLOC = 20; //allocate this many model matrices at a time, allocating this much more when it runs out
+constexpr uint32_t MAX_MODELS = 500; //allocate this many model matrices at a time

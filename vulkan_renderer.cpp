@@ -135,6 +135,8 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	VkFenceCreateInfo fenceCreateInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	VK_CHECK(vkCreateFence(device, &fenceCreateInfo, nullptr, &stagingBufferFence));
 
+	initTransforms();
+
 	uploadTestCube();
 
 	fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -143,11 +145,97 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 		VK_CHECK(vkCreateSemaphore(device, &semaphoreCreateInfo, nullptr, &presentSemaphores[i]));
 		VK_CHECK(vkCreateFence(device, &fenceCreateInfo, nullptr, &frameQueueFences[i]));
 	}
-
-	initTransforms();
 }
 
 void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState, EntityManager& entityManager) {
+	static uint32_t currentMeshInstanceEntity = 0;
+	static std::unordered_map<uint8_t, DynamicBufferUploadJobArgs> dynamicUploadJobArgs;
+	if (uiState.showUI) {
+		ImGuiIO& io = ImGui::GetIO();
+		uiState.uiHovered = io.WantCaptureMouse;
+		ImGui_ImplVulkan_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
+		if (ImGui::Begin("Settings", &uiState.showUI, 0)) {
+			if (!entityManager.isEmpty()) {
+				if (!entityManager.isValidEntity(currentMeshInstanceEntity)) {
+					auto it = entityManager.meshInstancesBegin();
+					currentMeshInstanceEntity = it->first;
+				}
+				MeshInstanceComponent meshInstance;
+				entityManager.getMeshInstance(currentMeshInstanceEntity, meshInstance);
+				ImGui::AlignTextToFramePadding();
+				ImGui::Text("Current entity: %d", currentMeshInstanceEntity);
+				ImGui::SameLine();
+				float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+				ImGui::PushButtonRepeat(true);
+				TransformComponent currentTransform;
+				if (ImGui::ArrowButton("##left", ImGuiDir_Left)) {
+					auto it = entityManager.getMeshInstanceIterator(currentMeshInstanceEntity);
+					if (it != entityManager.meshInstancesBegin()) {
+						it--;
+						currentMeshInstanceEntity = it->first;
+					}
+				}
+				ImGui::SameLine(0.0f, spacing);
+				if (ImGui::ArrowButton("##right", ImGuiDir_Right)) {
+					auto it = entityManager.getMeshInstanceIterator(currentMeshInstanceEntity);
+					it++;
+					if (it == entityManager.meshInstancesEnd()) it--;
+					currentMeshInstanceEntity = it->first;
+				}
+				ImGui::PopButtonRepeat();
+				entityManager.getTransform(currentMeshInstanceEntity, currentTransform);
+				ImGui::DragFloat3(" Pos xyz", glm::value_ptr(currentTransform.position), 0.1f, -1000.0f, 1000.0f);
+				bool transformEdited = false;
+				if (ImGui::IsItemEdited()) transformEdited = true;
+				ImGui::DragFloat3(" Scale xyz", glm::value_ptr(currentTransform.scale), 0.1f, 0.1f, 1000.0f);
+				if (ImGui::IsItemEdited()) transformEdited = true;
+				ImGui::DragFloat3(" Yaw, pitch, roll", glm::value_ptr(currentTransform.ypr), 0.01f, 0.0f, TWO_PI);
+				if (ImGui::IsItemEdited()) transformEdited = true;
+				uint32_t meshIndex = meshInstance.getMeshIndex();
+				uint32_t modelIndex = meshInstance.getModelIndex();
+				Mesh* mesh = meshes.at(meshIndex);
+				if (transformEdited) {
+					entityManager.setTransform(currentMeshInstanceEntity, currentTransform.position, currentTransform.scale, currentTransform.ypr);
+					glm::mat4 model = createModelMatrix(currentTransform.position, currentTransform.scale, currentTransform.ypr);
+					mesh->models.at(modelIndex) = model;
+					for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
+						DynamicBufferUploadJobArgs jobArgs{
+							mesh->modelMatrixBuffers[i],
+							mesh->modelMatrixBufferAllocations[i],
+							mesh->modelMatrixBufferAllocationInfos[i],
+							sizeof(glm::mat4) * mesh->models.size(),
+							mesh->models.data()
+						};
+						dynamicUploadJobArgs.emplace(i, jobArgs);
+					}
+				}
+				if (ImGui::Button("Duplicate current mesh") && dynamicUploadJobArgs.empty() && static_cast<uint32_t>(mesh->models.size()) < MAX_MODELS) {
+					mesh->models.push_back(glm::mat4{ 1.0f });
+					uint32_t entity = entityManager.createEntity();
+					entityManager.setMeshInstance(entity, meshIndex, static_cast<uint32_t>(mesh->models.size() - 1));
+					entityManager.setTransform(entity, currentTransform.position, currentTransform.scale, currentTransform.ypr);
+					mesh->entities.push_back(entity);
+					for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
+						DynamicBufferUploadJobArgs jobArgs{
+							mesh->modelMatrixBuffers[i],
+							mesh->modelMatrixBufferAllocations[i],
+							mesh->modelMatrixBufferAllocationInfos[i],
+							sizeof(glm::mat4) * mesh->models.size(),
+							mesh->models.data()
+						};
+						dynamicUploadJobArgs.emplace(i, jobArgs);
+					}
+				}
+			}
+		}
+		
+		ImGui::End();
+
+		ImGui::Render();
+	}
+
 	vkWaitForFences(device, 1, &frameQueueFences[currentFrame], VK_TRUE, UINT64_MAX);
 	VK_CHECK(vkResetFences(device, 1, &frameQueueFences[currentFrame]));
 	uint32_t swapchainImageIndex = 0;
@@ -177,6 +265,12 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	};
 	updateDynamicBuffer(jobArgs);
 
+	auto it = dynamicUploadJobArgs.find(currentFrame);
+	if (it != dynamicUploadJobArgs.end()) {
+		updateDynamicBuffer(it->second);
+		dynamicUploadJobArgs.erase(it);
+	}
+
 	std::vector<VkCommandBuffer>& commandBuffers = graphicsCommandPool.getCommandBuffers(FRAME_QUEUE_LENGTH);
 	VkCommandBuffer commandBuffer = commandBuffers.at(currentFrame);
 	VkCommandBufferBeginInfo commandBufferBeginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -202,18 +296,22 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 			meshBufferBarriers.clear();
 			uploadedMeshes = false;
 			for (Mesh* mesh : pendingMeshes) {
+				mesh->models.push_back(glm::mat4{ 1.0f });
 				for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
 					DynamicBufferUploadJobArgs jobArgs{
-						mesh->modelMatrixBuffers[i].at(0),
-						mesh->modelMatrixBufferAllocations[i].at(0),
-						mesh->modelMatrixBufferAllocationInfos[i].at(0),
-						sizeof(glm::mat4),
-						&testCubeModel
+						mesh->modelMatrixBuffers[i],
+						mesh->modelMatrixBufferAllocations[i],
+						mesh->modelMatrixBufferAllocationInfos[i],
+						sizeof(glm::mat4)*mesh->models.size(),
+						mesh->models.data()
 					};
 					updateDynamicBuffer(jobArgs);
 				}
-				mesh->numInstances++;
 				meshes.emplace(numMeshesCreated, mesh);
+				uint32_t entity = entityManager.createEntity();
+				mesh->entities.push_back(entity);
+				entityManager.setMeshInstance(entity, numMeshesCreated, 0);
+				entityManager.setTransform(entity, glm::vec3{ 0.0f }, glm::vec3{ 1.0f }, glm::vec3{ 0.0f });
 				numMeshesCreated++;
 			}
 			pendingMeshes.clear();
@@ -243,7 +341,7 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	VkRenderPassBeginInfo renderPassBeginInfo{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
 	renderPassBeginInfo.renderPass = renderPasses[RenderPass_Default];
 	renderPassBeginInfo.renderArea.extent = swapchain.extent;
-	renderPassBeginInfo.framebuffer = framebuffer[Framebuffer_Default][swapchainImageIndex];
+	renderPassBeginInfo.framebuffer = framebuffer[Framebuffer_Default].at(swapchainImageIndex);
 	renderPassBeginInfo.clearValueCount = 2;
 	VkClearValue clearValues[2]{};
 	memcpy(clearValues[0].color.float32, clearColor, sizeof(clearColor));
@@ -263,8 +361,14 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 		Mesh* mesh = pair.second;
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayouts[Graphics_Default],
 			1, 1, &(mesh->descriptorSet[currentFrame]), 0, nullptr);
-		 vkCmdDrawMeshTasks(commandBuffer, mesh->numMeshlets, mesh->numInstances, 1);
+		vkCmdDrawMeshTasks(commandBuffer, mesh->numMeshlets, static_cast<uint32_t>(mesh->models.size()), 1);
 	}
+	
+	if (uiState.showUI) {
+		ImDrawData* drawData = ImGui::GetDrawData();
+		ImGui_ImplVulkan_RenderDrawData(drawData, commandBuffer);
+	}
+
 	vkCmdEndRenderPass(commandBuffer);
 	VK_CHECK(vkEndCommandBuffer(commandBuffer));
 
@@ -869,7 +973,7 @@ void VulkanRenderer::uploadTestCube() {
 		VmaAllocation modelMatricesBufferAllocation = nullptr;
 		VmaAllocationInfo modelMatricesBufferAllocationInfo{};
 		VkBufferCreateInfo bufCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-		bufCreateInfo.size = MODELS_PER_ALLOC * sizeof(glm::mat4);
+		bufCreateInfo.size = MAX_MODELS * sizeof(glm::mat4);
 		bufCreateInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 		bufCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 		VmaAllocationCreateInfo allocCreateInfo {};
@@ -879,9 +983,9 @@ void VulkanRenderer::uploadTestCube() {
 			VMA_ALLOCATION_CREATE_MAPPED_BIT;
 		VK_CHECK(vmaCreateBuffer(allocator, &bufCreateInfo, &allocCreateInfo, &modelMatricesBuffer,
 			&modelMatricesBufferAllocation, &modelMatricesBufferAllocationInfo));
-		mesh->modelMatrixBuffers[i].push_back(modelMatricesBuffer);
-		mesh->modelMatrixBufferAllocations[i].push_back(modelMatricesBufferAllocation);
-		mesh->modelMatrixBufferAllocationInfos[i].push_back(modelMatricesBufferAllocationInfo);
+		mesh->modelMatrixBuffers[i] = modelMatricesBuffer;
+		mesh->modelMatrixBufferAllocations[i] = modelMatricesBufferAllocation;
+		mesh->modelMatrixBufferAllocationInfos[i] = modelMatricesBufferAllocationInfo;
 
 		defaultDescriptorAllocator.allocateSet(meshLayout, nullptr, mesh->descriptorSet[i]);
 		VkWriteDescriptorSet descriptorWrite[3];

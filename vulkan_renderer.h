@@ -37,6 +37,9 @@ struct Mesh {
 	Mesh() {
 		for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
 			descriptorSet[i] = VK_NULL_HANDLE;
+			modelMatrixBuffers[i] = VK_NULL_HANDLE;
+			modelMatrixBufferAllocations[i] = nullptr;
+			modelMatrixBufferAllocationInfos[i] = VmaAllocationInfo{};
 		}
 	}
 	uint32_t numMeshlets = 0;
@@ -48,10 +51,11 @@ struct Mesh {
 	VmaAllocation diffuseTextureAllocation = nullptr;
 	VkImage specularTexture = VK_NULL_HANDLE;
 	VmaAllocation specularTextureAllocation = nullptr;
-	uint32_t numInstances = 0;
-	std::vector<VkBuffer> modelMatrixBuffers[FRAME_QUEUE_LENGTH];
-	std::vector<VmaAllocation> modelMatrixBufferAllocations[FRAME_QUEUE_LENGTH];
-	std::vector<VmaAllocationInfo> modelMatrixBufferAllocationInfos[FRAME_QUEUE_LENGTH];
+	VkBuffer modelMatrixBuffers[FRAME_QUEUE_LENGTH];
+	VmaAllocation modelMatrixBufferAllocations[FRAME_QUEUE_LENGTH];
+	VmaAllocationInfo modelMatrixBufferAllocationInfos[FRAME_QUEUE_LENGTH];
+	std::vector<uint32_t> entities;
+	std::vector<glm::mat4> models;
 	VkDescriptorSet descriptorSet[FRAME_QUEUE_LENGTH]; //should be set number 1, representing models, vertexBuffer, and meshletBuffer
 	void destroy(VmaAllocator allocator) {
 		vmaDestroyBuffer(allocator, vertexBuffer, vertexBufferAllocation);
@@ -59,9 +63,7 @@ struct Mesh {
 		vmaDestroyImage(allocator, diffuseTexture, diffuseTextureAllocation);
 		vmaDestroyImage(allocator, specularTexture, specularTextureAllocation);
 		for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
-			for (int j = 0; j < modelMatrixBuffers[i].size(); j++) {
-				vmaDestroyBuffer(allocator, modelMatrixBuffers[i].at(j), modelMatrixBufferAllocations[i].at(j));
-			}
+			vmaDestroyBuffer(allocator, modelMatrixBuffers[i], modelMatrixBufferAllocations[i]);
 		}
 	}
 	friend bool operator ==(const Mesh& first, const Mesh& second) {
@@ -227,7 +229,6 @@ private:
 	// ^^^ USED BY MULTIPLE WORKER THREADS ^^^
 	VkPipelineCache dstPipelineCache = VK_NULL_HANDLE;
 
-	glm::mat4 testCubeModel{ 1.0f };
 	void uploadTestCube();
 
 	uint8_t currentFrame = 0;

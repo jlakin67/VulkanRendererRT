@@ -5,14 +5,10 @@
 #include "util.h"
 
 class TransformComponent {
-	friend class EntityManager;
+public:
 	glm::vec3 position{ 0.0f };
 	glm::vec3 scale{ 1.0f };
 	glm::vec3 ypr{ 0.0f }; //yaw, pitch, roll
-public:
-	inline glm::vec3 getPos() const { return position; }
-	inline glm::vec3 getScale() const { return scale; }
-	inline glm::vec3 getOrientation() const { return ypr; }
 };
 
 class MeshInstanceComponent {
@@ -30,6 +26,9 @@ class EntityManager {
 	std::unordered_map<uint32_t, TransformComponent> transformComponents; //indexed by entityIndex
 	uint32_t numEntitiesCreated = 0;
 public:
+	inline bool isEmpty() {
+		return entities.empty();
+	}
 	uint32_t createEntity() {
 		entities.insert(numEntitiesCreated);
 		return numEntitiesCreated++;
@@ -104,5 +103,27 @@ public:
 			meshInstance = it->second;
 			return true;
 		}
+	}
+	inline auto meshInstancesBegin() {
+		return meshInstanceComponents.begin();
+	}
+	inline auto meshInstancesEnd() {
+		return meshInstanceComponents.end();
+	}
+	inline auto transformsBegin() {
+		return transformComponents.begin();
+	}
+	inline auto transformsEnd() {
+		return transformComponents.end();
+	}
+	inline auto getMeshInstanceIterator(uint32_t entity) {
+		if (entities.find(entity) == entities.end()) return meshInstanceComponents.end();
+		auto it = meshInstanceComponents.find(entity);
+		return it;
+	}
+	inline auto getTransformIterator(uint32_t entity) {
+		if (entities.find(entity) == entities.end()) return transformComponents.end();
+		auto it = transformComponents.find(entity);
+		return it;
 	}
 };
