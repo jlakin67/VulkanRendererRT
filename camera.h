@@ -20,7 +20,7 @@ public:
 	}
 	void processMouse(double deltaX, double deltaY, double deltaTime) {
 		phi += deltaX * CAMERA_SENSITIVITY * deltaTime;
-		theta += deltaY * CAMERA_SENSITIVITY * deltaTime;
+		theta -= deltaY * CAMERA_SENSITIVITY * deltaTime;
 		if (theta < glm::radians(CAMERA_PRECISION)) theta = glm::radians(CAMERA_PRECISION);
 		if (theta > glm::radians(180.0 - CAMERA_PRECISION)) theta = glm::radians(180.0 - CAMERA_PRECISION);
 	}

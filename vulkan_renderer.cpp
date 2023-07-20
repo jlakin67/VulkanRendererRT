@@ -162,8 +162,8 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 					auto it = entityManager.meshInstancesBegin();
 					currentMeshInstanceEntity = it->first;
 				}
-				MeshInstanceComponent meshInstance;
-				entityManager.getMeshInstance(currentMeshInstanceEntity, meshInstance);
+				MeshInstanceComponent currentMeshInstance;
+				entityManager.getMeshInstance(currentMeshInstanceEntity, currentMeshInstance);
 				ImGui::AlignTextToFramePadding();
 				ImGui::Text("Current entity: %d", currentMeshInstanceEntity);
 				ImGui::SameLine();
@@ -193,40 +193,69 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 				if (ImGui::IsItemEdited()) transformEdited = true;
 				ImGui::DragFloat3(" Yaw, pitch, roll", glm::value_ptr(currentTransform.ypr), 0.01f, 0.0f, TWO_PI);
 				if (ImGui::IsItemEdited()) transformEdited = true;
-				uint32_t meshIndex = meshInstance.getMeshIndex();
-				uint32_t modelIndex = meshInstance.getModelIndex();
-				Mesh* mesh = meshes.at(meshIndex);
+				uint32_t currentMeshIndex = currentMeshInstance.getMeshIndex();
+				uint32_t currentModelIndex = currentMeshInstance.getModelIndex();
+				Mesh* currentMesh = meshes.at(currentMeshIndex);
 				if (transformEdited) {
 					entityManager.setTransform(currentMeshInstanceEntity, currentTransform.position, currentTransform.scale, currentTransform.ypr);
 					glm::mat4 model = createModelMatrix(currentTransform.position, currentTransform.scale, currentTransform.ypr);
-					mesh->models.at(modelIndex) = model;
+					currentMesh->models.at(currentModelIndex) = model;
 					for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
 						DynamicBufferUploadJobArgs jobArgs{
-							mesh->modelMatrixBuffers[i],
-							mesh->modelMatrixBufferAllocations[i],
-							mesh->modelMatrixBufferAllocationInfos[i],
-							sizeof(glm::mat4) * mesh->models.size(),
-							mesh->models.data()
+							currentMesh->modelMatrixBuffers[i],
+							currentMesh->modelMatrixBufferAllocations[i],
+							currentMesh->modelMatrixBufferAllocationInfos[i],
+							sizeof(glm::mat4) * currentMesh->models.size(),
+							currentMesh->models.data()
 						};
 						dynamicUploadJobArgs.emplace(i, jobArgs);
 					}
 				}
-				if (ImGui::Button("Duplicate current mesh") && dynamicUploadJobArgs.empty() && static_cast<uint32_t>(mesh->models.size()) < MAX_MODELS) {
-					mesh->models.push_back(glm::mat4{ 1.0f });
+				if (ImGui::Button("Duplicate current mesh") && dynamicUploadJobArgs.empty() && static_cast<uint32_t>(currentMesh->models.size()) < MAX_MODELS) {
+					currentMesh->models.push_back(currentMesh->models.at(currentModelIndex));
 					uint32_t entity = entityManager.createEntity();
-					entityManager.setMeshInstance(entity, meshIndex, static_cast<uint32_t>(mesh->models.size() - 1));
+					entityManager.setMeshInstance(entity, currentMeshIndex, static_cast<uint32_t>(currentMesh->models.size() - 1));
 					entityManager.setTransform(entity, currentTransform.position, currentTransform.scale, currentTransform.ypr);
-					mesh->entities.push_back(entity);
+					currentMesh->entities.push_back(entity);
 					for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
 						DynamicBufferUploadJobArgs jobArgs{
-							mesh->modelMatrixBuffers[i],
-							mesh->modelMatrixBufferAllocations[i],
-							mesh->modelMatrixBufferAllocationInfos[i],
-							sizeof(glm::mat4) * mesh->models.size(),
-							mesh->models.data()
+							currentMesh->modelMatrixBuffers[i],
+							currentMesh->modelMatrixBufferAllocations[i],
+							currentMesh->modelMatrixBufferAllocationInfos[i],
+							sizeof(glm::mat4) * currentMesh->models.size(),
+							currentMesh->models.data()
 						};
 						dynamicUploadJobArgs.emplace(i, jobArgs);
 					}
+				}
+				if (ImGui::Button("Delete current mesh") && dynamicUploadJobArgs.empty()) {
+					entityManager.destroyEntity(currentMeshInstanceEntity);
+					std::swap(currentMesh->models.at(currentModelIndex), currentMesh->models.back());
+					std::swap(currentMesh->entities.at(currentModelIndex), currentMesh->entities.back());
+					entityManager.setMeshInstance(currentMesh->entities.at(currentModelIndex), currentMeshIndex, currentModelIndex);
+					currentMesh->models.pop_back();
+					currentMesh->entities.pop_back();
+					if (currentMesh->models.empty()) {
+						meshes.erase(currentMeshIndex);
+						deletionQueue.push_back(std::make_pair(0, currentMesh));
+					}
+					else {
+						for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
+							DynamicBufferUploadJobArgs jobArgs{
+								currentMesh->modelMatrixBuffers[i],
+								currentMesh->modelMatrixBufferAllocations[i],
+								currentMesh->modelMatrixBufferAllocationInfos[i],
+								sizeof(glm::mat4) * currentMesh->models.size(),
+								currentMesh->models.data()
+							};
+							dynamicUploadJobArgs.emplace(i, jobArgs);
+						}
+					}
+				}
+			}
+			else {
+				if (ImGui::Button("Upload cube") && !meshUploadCounter.isBusy()) {
+					uploadTestCube();
 				}
 			}
 		}
@@ -252,10 +281,24 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 			VK_NULL_HANDLE, &swapchainImageIndex);
 	}
 	VK_CHECK(swapchainResult);
+	
+	//once deletionCounter == FRAMES_IN_FLIGHT, it's safe to free all the resources since it's no longer being used
+	for (auto it = deletionQueue.begin(); it != deletionQueue.end();) {
+		it->first++;
+		if (it->first == FRAME_QUEUE_LENGTH) {
+			it->second->destroy(allocator);
+			delete it->second;
+			it = deletionQueue.erase(it);
+		}
+		else {
+			it++;
+		}
+	}
 
 	uniformMatrices[currentFrame].view = camera.getView();
 	float currentAspectRatio = (float)currentWidth / (float)currentHeight;
 	uniformMatrices[currentFrame].projection = glm::perspective(CAMERA_FOV_Y, currentAspectRatio, Z_NEAR, Z_FAR);
+	uniformMatrices[currentFrame].projection[1][1] *= -1;
 	DynamicBufferUploadJobArgs jobArgs{
 		transformsBuffers[currentFrame],
 		transformsBufferAllocations[currentFrame],
@@ -420,6 +463,10 @@ void VulkanRenderer::shutDown() {
 	for (Mesh* mesh : pendingMeshes) { //should be empty
 		mesh->destroy(allocator);
 		delete mesh;
+	}
+	for (auto& pair : deletionQueue) { //may or may not be empty
+		pair.second->destroy(allocator);
+		delete pair.second;
 	}
 	for (auto& pair : meshes) {
 		pair.second->destroy(allocator);

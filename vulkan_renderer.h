@@ -54,8 +54,8 @@ struct Mesh {
 	VkBuffer modelMatrixBuffers[FRAME_QUEUE_LENGTH];
 	VmaAllocation modelMatrixBufferAllocations[FRAME_QUEUE_LENGTH];
 	VmaAllocationInfo modelMatrixBufferAllocationInfos[FRAME_QUEUE_LENGTH];
-	std::vector<uint32_t> entities;
 	std::vector<glm::mat4> models;
+	std::vector<uint32_t> entities; //corresponds to the exact same entry in models and should be same length
 	VkDescriptorSet descriptorSet[FRAME_QUEUE_LENGTH]; //should be set number 1, representing models, vertexBuffer, and meshletBuffer
 	void destroy(VmaAllocator allocator) {
 		vmaDestroyBuffer(allocator, vertexBuffer, vertexBufferAllocation);
@@ -101,6 +101,7 @@ public:
 				glm::mat4{ 1.0f },
 				glm::perspective(CAMERA_FOV_Y, INIT_ASPECT_RATIO, Z_NEAR, Z_FAR)
 			};
+			uniformMatrices[i].projection[1][1] *= -1;
 		}
 	}
 
@@ -199,6 +200,7 @@ private:
 	std::vector<Mesh*> pendingMeshes; //once mesh counter is complete add these to the meshes map and clear
 	uint32_t numMeshesCreated = 0;
 	std::unordered_map<uint32_t, Mesh*> meshes; //maps meshIndex to Mesh
+	std::vector<std::pair<uint64_t, Mesh*>> deletionQueue;
 
 	//These three functions below are meant to be used in the IOThread:
 	
