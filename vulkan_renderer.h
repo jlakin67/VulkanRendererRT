@@ -102,6 +102,7 @@ public:
 				glm::perspective(CAMERA_FOV_Y, INIT_ASPECT_RATIO, Z_NEAR, Z_FAR)
 			};
 			uniformMatrices[i].projection[1][1] *= -1;
+			frameInMeasurement[i] = false;
 		}
 	}
 
@@ -126,6 +127,17 @@ private:
 	VkSemaphore acquireSemaphores[FRAME_QUEUE_LENGTH];
 	VkSemaphore presentSemaphores[FRAME_QUEUE_LENGTH];
 	VkFence frameQueueFences[FRAME_QUEUE_LENGTH];
+
+	bool timestampBitsValid = false;
+	double timestampPeriod = 1.0;
+	VkQueryPool queryPool = VK_NULL_HANDLE;
+	bool measureFrameTime = false;
+	bool frameInMeasurement[FRAME_QUEUE_LENGTH];
+	bool frameTimeAvailable = false;
+	uint64_t sumFrameTime = 0;
+	double averageFrameTime = 0;
+	uint32_t numFrameTimeSampled = 0;
+	bool getFrameTime(uint8_t currentFrame, uint64_t& time);
 
 	uint32_t maxPossibleInstances = MAX_MESH_INSTANCES;
 

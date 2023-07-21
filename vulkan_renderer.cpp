@@ -91,6 +91,13 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	vkCmdDrawMeshTasks = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT"));
 	assert(vkCmdDrawMeshTasks);
 
+	if (device.queue_families.at(graphicsQueueIndex).timestampValidBits >= 64) timestampBitsValid = true;
+	timestampPeriod = physicalDevice.properties.limits.timestampPeriod;
+	VkQueryPoolCreateInfo queryPoolCreateInfo{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+	queryPoolCreateInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+	queryPoolCreateInfo.queryCount = 2*FRAME_QUEUE_LENGTH;
+	VK_CHECK(vkCreateQueryPool(device, &queryPoolCreateInfo, nullptr, &queryPool));
+
 	VmaAllocatorCreateInfo allocatorInfo{};
 	allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
 	allocatorInfo.instance = instance.instance;
@@ -252,6 +259,16 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 						}
 					}
 				}
+				if (timestampBitsValid) {
+					if (ImGui::Button("Measure average frame time") && !measureFrameTime) {
+						measureFrameTime = true;
+						frameTimeAvailable = false;
+					}
+				}
+				if (frameTimeAvailable) {
+					ImGui::SameLine();
+					ImGui::Text("%.8f ms", static_cast<double>(averageFrameTime) * timestampPeriod * 1e-6);
+				}
 			}
 			else {
 				if (ImGui::Button("Upload cube") && !meshUploadCounter.isBusy()) {
@@ -282,7 +299,7 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	}
 	VK_CHECK(swapchainResult);
 	
-	//once deletionCounter == FRAMES_IN_FLIGHT, it's safe to free all the resources since it's no longer being used
+	//once deletionCounter == FRAME_QUEUE_LENGTH, it's safe to free all the resources since it's no longer being used
 	for (auto it = deletionQueue.begin(); it != deletionQueue.end();) {
 		it->first++;
 		if (it->first == FRAME_QUEUE_LENGTH) {
@@ -390,6 +407,12 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	memcpy(clearValues[0].color.float32, clearColor, sizeof(clearColor));
 	clearValues[1].depthStencil.depth = 1.0f;
 	renderPassBeginInfo.pClearValues = clearValues;
+
+	if (measureFrameTime && !frameInMeasurement[currentFrame]) {
+		vkCmdResetQueryPool(commandBuffer, queryPool, 2*currentFrame, 2);
+		vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, 2 * currentFrame);
+	}
+
 	vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines[Graphics_Default]);
 	VkViewport viewport{ 0.0f, 0.0f, static_cast<float>(swapchain.extent.width) ,
@@ -413,6 +436,12 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	}
 
 	vkCmdEndRenderPass(commandBuffer);
+
+	if (measureFrameTime && !frameInMeasurement[currentFrame]) {
+		vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 2 * currentFrame + 1);
+		frameInMeasurement[currentFrame] = true;
+	}
+
 	VK_CHECK(vkEndCommandBuffer(commandBuffer));
 
 	submitInfo.signalSemaphoreCount = 1;
@@ -420,6 +449,22 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &commandBuffer;
 	vkQueueSubmit(graphicsQueue, 1, &submitInfo, frameQueueFences[currentFrame]);
+
+	if (measureFrameTime) {
+		uint64_t frameTime = 0;
+		frameTimeAvailable = getFrameTime(currentFrame, frameTime);
+		if (frameTimeAvailable) {
+			frameInMeasurement[currentFrame] = false;
+			sumFrameTime += frameTime;
+			numFrameTimeSampled++;
+			if (numFrameTimeSampled == NUM_FRAME_TIME_SAMPLES) {
+				measureFrameTime = false;
+				numFrameTimeSampled = 0;
+				averageFrameTime = static_cast<double>(sumFrameTime) / NUM_FRAME_TIME_SAMPLES;
+				sumFrameTime = 0;
+			}
+		}
+	}
 
 	VkPresentInfoKHR presentInfo{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
 	presentInfo.pImageIndices = &swapchainImageIndex;
@@ -487,11 +532,23 @@ void VulkanRenderer::shutDown() {
 	for (int i = 0; i < numRenderPasses; i++) {
 		vkDestroyRenderPass(device, renderPasses[i], nullptr);
 	}
+	vkDestroyQueryPool(device, queryPool, nullptr);
 	destroySwapchain();
 	vmaDestroyAllocator(allocator);
 	vkb::destroy_device(device);
 	vkDestroySurfaceKHR(instance, surface, nullptr);
 	vkb::destroy_instance(instance);
+}
+
+bool VulkanRenderer::getFrameTime(uint8_t currentFrame, uint64_t& time) {
+	uint64_t buffer[2];
+	VkResult result = vkGetQueryPoolResults(device, queryPool, 2*currentFrame, 2, 2*sizeof(uint64_t),
+		buffer, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+	if (result == VK_SUCCESS) {
+		time = buffer[1] - buffer[0];
+		return true;
+	}
+	else return false;
 }
 
 void VulkanRenderer::chooseDefaultDepthFormat() {

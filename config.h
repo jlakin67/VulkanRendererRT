@@ -50,3 +50,5 @@ constexpr uint32_t MESHLET_MAX_VERTICES = 32;
 constexpr uint32_t MESHLET_MAX_INDICES = MESHLET_MAX_VERTICES * 3;
 
 constexpr uint32_t MAX_MODELS = 500; //allocate this many model matrices at a time
+
+constexpr uint32_t NUM_FRAME_TIME_SAMPLES = 100;
