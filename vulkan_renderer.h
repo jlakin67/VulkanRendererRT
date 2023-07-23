@@ -25,10 +25,14 @@ enum PipelineNames {
 
 constexpr uint32_t numPipelineCaches = numPipelines + 1; //one included for ImGui
 
+struct Vertex {
+	glm::vec4 pos;
+};
+
 struct Meshlet
 {
 	uint32_t vertices[MESHLET_MAX_VERTICES];
-	uint32_t indices[MESHLET_MAX_INDICES]; // up to 126 triangles
+	uint32_t indices[MESHLET_MAX_INDICES]; // 32 triangles
 	uint32_t vertexCount;
 	uint32_t indexCount;
 };
@@ -109,6 +113,7 @@ public:
 	void startUp(GLFWwindow* window);
 	void render(GLFWwindow* window, Camera& camera, UIState& uiState, EntityManager& entityManager);
 	void wait() { if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device); }
+	void loadMesh(std::string path);
 	void shutDown(); //control destruction order explicitly
 private:
 	JobManager& jobManager;
@@ -139,6 +144,7 @@ private:
 	uint32_t numFrameTimeSampled = 0;
 	bool getFrameTime(uint8_t currentFrame, uint64_t& time);
 
+	uint32_t maxPossibleMeshlets = 0;
 	uint32_t maxPossibleInstances = MAX_MESH_INSTANCES;
 
 	int currentWidth = INIT_SCR_WIDTH, currentHeight = INIT_SCR_HEIGHT;
@@ -207,7 +213,6 @@ private:
 	// ^^^ USED BY IO THREAD ^^^
 	JobCounter meshUploadCounter;
 	JobCounter dynamicBufferUploadCounter;
-	std::vector<VkBufferMemoryBarrier> meshBufferBarriers; //don't use these until mesh counter is finished
 	std::vector<VkBufferMemoryBarrier> dynamicBufferBarriers; //don't use these until dynamic buffer counter is finished
 	std::vector<Mesh*> pendingMeshes; //once mesh counter is complete add these to the meshes map and clear
 	uint32_t numMeshesCreated = 0;
@@ -244,6 +249,8 @@ private:
 	VkPipelineCache dstPipelineCache = VK_NULL_HANDLE;
 
 	void uploadTestCube();
+
+	friend void loadMeshJob(void* jobArgs);
 
 	uint8_t currentFrame = 0;
 	uint64_t numFramesProcessed = 0;

@@ -63,6 +63,54 @@
     <ClCompile Include="dependencies\imgui-1.89.4\imgui_widgets.cpp">
       <Filter>Dependencies</Filter>
     </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\allocator.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\clusterizer.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\indexcodec.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\indexgenerator.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\overdrawanalyzer.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\overdrawoptimizer.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\simplifier.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\spatialorder.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\stripifier.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vcacheanalyzer.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vcacheoptimizer.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vertexcodec.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vertexfilter.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vfetchanalyzer.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vfetchoptimizer.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
+    <ClCompile Include="dependencies\tinyobjloader-release-7212023\tiny_obj_loader.cc">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="vulkan_renderer.h">

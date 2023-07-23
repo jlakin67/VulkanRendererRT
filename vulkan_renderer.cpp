@@ -3,6 +3,8 @@
 #include <fstream>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_vulkan.h>
+#include <tiny_obj_loader.h>
+#include <meshoptimizer.h>
 
 void VulkanRenderer::startUp(GLFWwindow* window) {
 	vkb::InstanceBuilder instanceBuilder{};
@@ -76,6 +78,7 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	VkPhysicalDeviceMeshShaderPropertiesEXT meshShaderProp{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT };
 	physProp.pNext = &meshShaderProp;
 	vkGetPhysicalDeviceProperties2(physicalDevice, &physProp);
+	maxPossibleMeshlets = meshShaderProp.maxMeshWorkGroupCount[0];
 	maxPossibleInstances = meshShaderProp.maxMeshWorkGroupCount[1];
 	vkb::DeviceBuilder deviceBuilder{ physicalDevice };
 	auto deviceBuilderRet = deviceBuilder.build();
@@ -275,6 +278,12 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 					uploadTestCube();
 				}
 			}
+			static char fileName[1000] = "";
+			ImGui::InputText("Path to load mesh", fileName, IM_ARRAYSIZE(fileName));
+			uiState.editingText = ImGui::IsItemActive();
+			if (ImGui::Button("Upload mesh") && !meshUploadCounter.isBusy()) {
+				loadMesh(fileName);
+			}
 		}
 		
 		ImGui::End();
@@ -349,15 +358,84 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	bool pushedTransferSemaphore = false;
 	if (uploadedMeshes) {
 		if (!meshUploadCounter.isBusy()) {
-			waitSemaphores.push_back(transferSemaphore);
-			waitStages.push_back(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
-			pushedTransferSemaphore = true;
-			bufferMemoryBarriers.insert(bufferMemoryBarriers.end(), meshBufferBarriers.begin(), meshBufferBarriers.end());
-			meshBufferBarriers.clear();
 			uploadedMeshes = false;
+			uint32_t numSuccessfulUploads = 0;
 			for (Mesh* mesh : pendingMeshes) {
+				if (mesh->vertexBuffer == VK_NULL_HANDLE) { //upload failed
+					delete mesh;
+					continue;
+				}
+				VkBufferMemoryBarrier bufferMemoryBarrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+				bufferMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				bufferMemoryBarrier.srcQueueFamilyIndex = transferQueueIndex;
+				bufferMemoryBarrier.dstQueueFamilyIndex = graphicsQueueIndex;
+				bufferMemoryBarrier.buffer = mesh->vertexBuffer;
+				bufferMemoryBarrier.size = VK_WHOLE_SIZE;
+				bufferMemoryBarriers.push_back(bufferMemoryBarrier);
+				bufferMemoryBarrier.buffer = mesh->meshletBuffer;
+				bufferMemoryBarriers.push_back(bufferMemoryBarrier);
 				mesh->models.push_back(glm::mat4{ 1.0f });
 				for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
+					VkBuffer modelMatricesBuffer = VK_NULL_HANDLE;
+					VmaAllocation modelMatricesBufferAllocation = nullptr;
+					VmaAllocationInfo modelMatricesBufferAllocationInfo{};
+					VkBufferCreateInfo bufCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+					bufCreateInfo.size = MAX_MODELS * sizeof(glm::mat4);
+					bufCreateInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+					bufCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+					VmaAllocationCreateInfo allocCreateInfo{};
+					allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+					allocCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+						VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT |
+						VMA_ALLOCATION_CREATE_MAPPED_BIT;
+					VK_CHECK(vmaCreateBuffer(allocator, &bufCreateInfo, &allocCreateInfo, &modelMatricesBuffer,
+						&modelMatricesBufferAllocation, &modelMatricesBufferAllocationInfo));
+					mesh->modelMatrixBuffers[i] = modelMatricesBuffer;
+					mesh->modelMatrixBufferAllocations[i] = modelMatricesBufferAllocation;
+					mesh->modelMatrixBufferAllocationInfos[i] = modelMatricesBufferAllocationInfo;
+
+					defaultDescriptorAllocator.allocateSet(meshLayout, nullptr, mesh->descriptorSet[i]);
+					VkWriteDescriptorSet descriptorWrite[3];
+					VkDescriptorBufferInfo descriptorBufInfo[3];
+					descriptorWrite[0] = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+					descriptorWrite[0].dstSet = mesh->descriptorSet[i];
+					descriptorWrite[0].dstBinding = 0;
+					descriptorWrite[0].dstArrayElement = 0;
+					descriptorWrite[0].descriptorCount = 1;
+					descriptorWrite[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					descriptorBufInfo[0] = {
+						modelMatricesBuffer,
+						0,
+						VK_WHOLE_SIZE
+					};
+					descriptorWrite[0].pBufferInfo = &descriptorBufInfo[0];
+
+					descriptorWrite[1] = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+					descriptorWrite[1].dstSet = mesh->descriptorSet[i];
+					descriptorWrite[1].dstBinding = 1;
+					descriptorWrite[1].dstArrayElement = 0;
+					descriptorWrite[1].descriptorCount = 1;
+					descriptorWrite[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					descriptorBufInfo[1] = {
+						mesh->vertexBuffer,
+						0,
+						VK_WHOLE_SIZE
+					};
+					descriptorWrite[1].pBufferInfo = &descriptorBufInfo[1];
+
+					descriptorWrite[2] = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+					descriptorWrite[2].dstSet = mesh->descriptorSet[i];
+					descriptorWrite[2].dstBinding = 2;
+					descriptorWrite[2].dstArrayElement = 0;
+					descriptorWrite[2].descriptorCount = 1;
+					descriptorWrite[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					descriptorBufInfo[2] = {
+						mesh->meshletBuffer,
+						0,
+						VK_WHOLE_SIZE
+					};
+					descriptorWrite[2].pBufferInfo = &descriptorBufInfo[2];
+					vkUpdateDescriptorSets(device, 3, descriptorWrite, 0, nullptr);
 					DynamicBufferUploadJobArgs jobArgs{
 						mesh->modelMatrixBuffers[i],
 						mesh->modelMatrixBufferAllocations[i],
@@ -373,6 +451,12 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 				entityManager.setMeshInstance(entity, numMeshesCreated, 0);
 				entityManager.setTransform(entity, glm::vec3{ 0.0f }, glm::vec3{ 1.0f }, glm::vec3{ 0.0f });
 				numMeshesCreated++;
+				numSuccessfulUploads++;
+			}
+			if (numSuccessfulUploads > 0) {
+				waitSemaphores.push_back(transferSemaphore);
+				waitStages.push_back(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+				pushedTransferSemaphore = true;
 			}
 			pendingMeshes.clear();
 		}
@@ -483,6 +567,154 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	}
 	currentFrame = (currentFrame + 1) % FRAME_QUEUE_LENGTH;
 	numFramesProcessed++;
+}
+
+struct LoadMeshJobArgs {
+	std::string path;
+	Mesh* mesh = nullptr;
+	VulkanRenderer* renderer = nullptr;
+};
+
+void loadMeshJob(void* jobArgs) {
+	assert(jobArgs);
+	LoadMeshJobArgs* args = reinterpret_cast<LoadMeshJobArgs*>(jobArgs);
+	Mesh* mesh = args->mesh;
+	assert(mesh);
+	VulkanRenderer* renderer = args->renderer;
+	assert(renderer);
+	std::string directory;
+	size_t pos = args->path.find_last_of('/');
+	if (pos != std::string::npos)
+		directory = args->path.substr(0, pos); //for searching textures
+	tinyobj::ObjReaderConfig readerConfig;
+	readerConfig.vertex_color = false;
+	readerConfig.triangulate = true;
+	tinyobj::ObjReader reader;
+	if (!reader.ParseFromFile(args->path, readerConfig)) {
+		if (!reader.Error().empty()) {
+			std::cout << "TinyObjReader: " << reader.Error();
+			std::cout.flush();
+		}
+		delete args;
+		return;
+	}
+
+	if (!reader.Warning().empty()) {
+		std::cout << "TinyObjReader: " << reader.Warning();
+	}
+
+	std::cout << "Loading mesh at " << args->path << std::endl;
+
+	const tinyobj::attrib_t& attrib = reader.GetAttrib();
+	const std::vector<tinyobj::shape_t>& shapes = reader.GetShapes();
+	const std::vector<tinyobj::material_t>& materials = reader.GetMaterials();
+
+	std::vector<Vertex> unindexedVertices;
+	std::vector<uint32_t> remap;
+	std::vector<Vertex> vertices;
+	std::vector<uint32_t> indices;
+	std::vector<Meshlet> meshlets;
+
+	uint32_t numIndices = 0;
+	for (const tinyobj::shape_t& shape : shapes) {
+		const tinyobj::mesh_t& mesh = shape.mesh;
+		size_t indexOffset = 0;
+		for (int f = 0; f < mesh.num_face_vertices.size(); f++) {
+			for (int v = 0; v < 3; v++) {
+				tinyobj::index_t idx = mesh.indices[indexOffset + v];
+				Vertex vertex;
+				vertex.pos.x = attrib.vertices[3 * size_t(idx.vertex_index) + 0];
+				vertex.pos.y = attrib.vertices[3 * size_t(idx.vertex_index) + 1];
+				vertex.pos.z = attrib.vertices[3 * size_t(idx.vertex_index) + 2];
+				vertex.pos.w = 1.0f;
+
+				// Check if `normal_index` is zero or positive. negative = no normal data
+				// Check if `texcoord_index` is zero or positive. negative = no texcoord data
+
+				unindexedVertices.push_back(vertex);
+			}
+			indexOffset += 3;
+		}
+	}
+
+	size_t indexCount = unindexedVertices.size();
+	remap.resize(indexCount);
+	size_t vertexCount = meshopt_generateVertexRemap(remap.data(), nullptr, indexCount, 
+		unindexedVertices.data(), indexCount, sizeof(Vertex));
+	indices.resize(indexCount);
+	vertices.resize(vertexCount);
+	meshopt_remapIndexBuffer(indices.data(), nullptr, indexCount, remap.data());
+	meshopt_remapVertexBuffer(vertices.data(), unindexedVertices.data(), indexCount, sizeof(Vertex), remap.data());
+	
+	size_t maxMeshlets = static_cast<size_t>(renderer->maxPossibleMeshlets);
+	meshopt_Meshlet* meshOptMeshlets = new meshopt_Meshlet[maxMeshlets];
+	uint32_t* meshletVertices = new uint32_t[MESHLET_MAX_VERTICES * maxMeshlets];
+	unsigned char* meshletTriangles = new unsigned char[MESHLET_MAX_INDICES * maxMeshlets];
+	uint32_t numMeshletsGenerated = meshopt_buildMeshlets(meshOptMeshlets, meshletVertices, meshletTriangles,
+		indices.data(), static_cast<uint32_t>(indexCount), &vertices[0].pos.x, 
+		static_cast<uint32_t>(vertexCount), sizeof(Vertex), MESHLET_MAX_VERTICES, MESHLET_MAX_INDICES / 3, 0.0f);
+	for (uint32_t i = 0; i < numMeshletsGenerated && i < maxMeshlets; i++) {
+		meshopt_Meshlet& meshOptMeshlet = meshOptMeshlets[i];
+		Meshlet meshlet;
+		meshlet.vertexCount = meshOptMeshlet.vertex_count;
+		meshlet.indexCount = meshOptMeshlet.triangle_count*3;
+		for (uint32_t j = 0; j < meshlet.vertexCount; j++) {
+			meshlet.vertices[j] = meshletVertices[j + meshOptMeshlet.vertex_offset];
+		}
+		for (uint32_t j = 0; j < meshOptMeshlet.triangle_count; j++) {
+			meshlet.indices[3*j] = meshletTriangles[meshOptMeshlet.triangle_offset + 3*j];
+			meshlet.indices[3 * j + 1] = meshletTriangles[meshOptMeshlet.triangle_offset + 3*j + 1];
+			meshlet.indices[3 * j + 2] = meshletTriangles[meshOptMeshlet.triangle_offset + 3*j + 2];
+		}
+		meshlets.push_back(meshlet);
+	}
+	delete[] meshOptMeshlets;
+	delete[] meshletVertices;
+	delete[] meshletTriangles;
+	mesh->numMeshlets = numMeshletsGenerated;
+
+	VkBuffer vertexBuffer = VK_NULL_HANDLE, meshletBuffer = VK_NULL_HANDLE;
+	VmaAllocation vertexBufferAllocation = nullptr, meshletBufferAllocation = nullptr;
+	VkBufferCreateInfo bufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	bufferCreateInfo.size = vertices.size() * sizeof(Vertex);
+	VmaAllocationCreateInfo bufferAllocInfo{};
+	bufferAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	VK_CHECK(vmaCreateBuffer(renderer->allocator, &bufferCreateInfo, &bufferAllocInfo, &vertexBuffer, &vertexBufferAllocation, nullptr));
+	mesh->vertexBuffer = vertexBuffer;
+	mesh->vertexBufferAllocation = vertexBufferAllocation;
+	bufferCreateInfo.size = sizeof(Meshlet) * meshlets.size();
+	VK_CHECK(vmaCreateBuffer(renderer->allocator, &bufferCreateInfo, &bufferAllocInfo, &meshletBuffer, &meshletBufferAllocation, nullptr));
+	mesh->meshletBuffer = meshletBuffer;
+	mesh->meshletBufferAllocation = meshletBufferAllocation;
+
+	renderer->stageBuffer(vertices.data(), vertices.size()*sizeof(Vertex), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
+		mesh->vertexBuffer, mesh->vertexBufferAllocation);
+	renderer->stageBuffer(meshlets.data(), sizeof(Meshlet) * meshlets.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		mesh->meshletBuffer, mesh->meshletBufferAllocation);
+	renderer->uploadBuffers();
+	renderer->finalizeBufferUpload();
+
+	delete args;
+
+	std::cout << "Finished loading mesh" << std::endl;
+}
+
+void VulkanRenderer::loadMesh(std::string path) {
+	std::string newPath(path);
+	std::replace(newPath.begin(), newPath.end(), '\\', '/');
+
+	Mesh* mesh = new Mesh;
+	pendingMeshes.push_back(mesh);
+
+	Job job;
+	LoadMeshJobArgs* jobArgs = new LoadMeshJobArgs{ newPath, mesh, this};
+	job.func = loadMeshJob;
+	job.jobArgs = jobArgs;
+	job.counter = &meshUploadCounter;
+	uploadedMeshes = true;
+	ioThread.jobQueue.pushJob(job);
 }
 
 void VulkanRenderer::shutDown() {
@@ -1062,78 +1294,8 @@ void VulkanRenderer::uploadTestCube() {
 	VK_CHECK(vmaCreateBuffer(allocator, &bufferCreateInfo, &bufferAllocInfo, &meshletBuffer, &meshletBufferAllocation, nullptr));
 	mesh->meshletBuffer = meshletBuffer;
 	mesh->meshletBufferAllocation = meshletBufferAllocation;
-	VkBufferMemoryBarrier bufferMemoryBarrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-	bufferMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	bufferMemoryBarrier.srcQueueFamilyIndex = transferQueueIndex;
-	bufferMemoryBarrier.dstQueueFamilyIndex = graphicsQueueIndex;
-	bufferMemoryBarrier.buffer = vertexBuffer;
-	bufferMemoryBarrier.size = VK_WHOLE_SIZE;
-	meshBufferBarriers.push_back(bufferMemoryBarrier);
-	bufferMemoryBarrier.buffer = meshletBuffer;
-	meshBufferBarriers.push_back(bufferMemoryBarrier);
 	pendingMeshes.push_back(mesh);
-	for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
-		VkBuffer modelMatricesBuffer = VK_NULL_HANDLE;
-		VmaAllocation modelMatricesBufferAllocation = nullptr;
-		VmaAllocationInfo modelMatricesBufferAllocationInfo{};
-		VkBufferCreateInfo bufCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-		bufCreateInfo.size = MAX_MODELS * sizeof(glm::mat4);
-		bufCreateInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-		bufCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-		VmaAllocationCreateInfo allocCreateInfo {};
-		allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
-		allocCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-			VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT |
-			VMA_ALLOCATION_CREATE_MAPPED_BIT;
-		VK_CHECK(vmaCreateBuffer(allocator, &bufCreateInfo, &allocCreateInfo, &modelMatricesBuffer,
-			&modelMatricesBufferAllocation, &modelMatricesBufferAllocationInfo));
-		mesh->modelMatrixBuffers[i] = modelMatricesBuffer;
-		mesh->modelMatrixBufferAllocations[i] = modelMatricesBufferAllocation;
-		mesh->modelMatrixBufferAllocationInfos[i] = modelMatricesBufferAllocationInfo;
-
-		defaultDescriptorAllocator.allocateSet(meshLayout, nullptr, mesh->descriptorSet[i]);
-		VkWriteDescriptorSet descriptorWrite[3];
-		VkDescriptorBufferInfo descriptorBufInfo[3];
-		descriptorWrite[0] = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		descriptorWrite[0].dstSet = mesh->descriptorSet[i];
-		descriptorWrite[0].dstBinding = 0;
-		descriptorWrite[0].dstArrayElement = 0;
-		descriptorWrite[0].descriptorCount = 1;
-		descriptorWrite[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		descriptorBufInfo[0] = {
-			modelMatricesBuffer,
-			0,
-			VK_WHOLE_SIZE
-		};
-		descriptorWrite[0].pBufferInfo = &descriptorBufInfo[0];
-
-		descriptorWrite[1] = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		descriptorWrite[1].dstSet = mesh->descriptorSet[i];
-		descriptorWrite[1].dstBinding = 1;
-		descriptorWrite[1].dstArrayElement = 0;
-		descriptorWrite[1].descriptorCount = 1;
-		descriptorWrite[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		descriptorBufInfo[1] = {
-			vertexBuffer,
-			0,
-			VK_WHOLE_SIZE
-		};
-		descriptorWrite[1].pBufferInfo = &descriptorBufInfo[1];
-
-		descriptorWrite[2] = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		descriptorWrite[2].dstSet = mesh->descriptorSet[i];
-		descriptorWrite[2].dstBinding = 2;
-		descriptorWrite[2].dstArrayElement = 0;
-		descriptorWrite[2].descriptorCount = 1;
-		descriptorWrite[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		descriptorBufInfo[2] = {
-			meshletBuffer,
-			0,
-			VK_WHOLE_SIZE
-		};
-		descriptorWrite[2].pBufferInfo = &descriptorBufInfo[2];
-		vkUpdateDescriptorSets(device, 3, descriptorWrite, 0, nullptr);
-	}
+	
 	Job uploadTestCubeJob{};
 	uploadTestCubeJob.jobArgs = mesh;
 	uploadTestCubeJob.counter = &meshUploadCounter;

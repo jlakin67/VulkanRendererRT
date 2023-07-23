@@ -6,6 +6,7 @@
 #include <GLFW/glfw3.h>
 
 struct UIState {
+	bool editingText = false;
 	bool uiHovered = false;
 	bool showUI = true;
 };

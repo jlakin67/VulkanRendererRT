@@ -79,12 +79,12 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>dependencies/imgui-1.89.4/backends/;dependencies/imgui-1.89.4/;dependencies/glm-0.9.9.8/;dependencies/vk-bootstrap-0.7/;dependencies/glfw-3.3.8.bin.WIN64/include/;dependencies/VulkanSDK-1.3.250.1/include/;dependencies/VulkanMemoryAllocator-3.0.1/;$(IncludePath);$(IncludePath)</IncludePath>
+    <IncludePath>dependencies/imgui-1.89.4/backends/;dependencies/imgui-1.89.4/;dependencies/glm-0.9.9.8/;dependencies/vk-bootstrap-0.7/;dependencies/glfw-3.3.8.bin.WIN64/include/;dependencies/VulkanSDK-1.3.250.1/include/;dependencies/tinyobjloader-release-7212023/;dependencies/VulkanMemoryAllocator-3.0.1/;dependencies/meshoptimizer-0.19/;$(IncludePath);$(IncludePath)</IncludePath>
     <LibraryPath>dependencies/glfw-3.3.8.bin.WIN64/lib-vc2019/;dependencies/VulkanSDK-1.3.250.1/;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>dependencies/imgui-1.89.4/backends/;dependencies/imgui-1.89.4/;dependencies/glm-0.9.9.8/;dependencies/vk-bootstrap-0.7/;dependencies/glfw-3.3.8.bin.WIN64/include/;dependencies/VulkanSDK-1.3.250.1/include/;dependencies/VulkanMemoryAllocator-3.0.1/;$(VC_IncludePath);$(WindowsSDK_IncludePath);;$(IncludePath)</IncludePath>
+    <IncludePath>dependencies/imgui-1.89.4/backends/;dependencies/imgui-1.89.4/;dependencies/glm-0.9.9.8/;dependencies/vk-bootstrap-0.7/;dependencies/glfw-3.3.8.bin.WIN64/include/;dependencies/VulkanSDK-1.3.250.1/include/;dependencies/tinyobjloader-release-7212023/;dependencies/VulkanMemoryAllocator-3.0.1/;dependencies/meshoptimizer-0.19/;$(VC_IncludePath);$(WindowsSDK_IncludePath);;$(IncludePath)</IncludePath>
     <LibraryPath>dependencies/glfw-3.3.8.bin.WIN64/lib-vc2019/;dependencies/VulkanSDK-1.3.250.1/;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -124,7 +124,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <DisableSpecificWarnings>26812;</DisableSpecificWarnings>
+      <DisableSpecificWarnings>26812;26451;</DisableSpecificWarnings>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -141,7 +141,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <DisableSpecificWarnings>26812;</DisableSpecificWarnings>
+      <DisableSpecificWarnings>26812;26451;</DisableSpecificWarnings>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -159,6 +159,22 @@
     <ClCompile Include="dependencies\imgui-1.89.4\imgui_draw.cpp" />
     <ClCompile Include="dependencies\imgui-1.89.4\imgui_tables.cpp" />
     <ClCompile Include="dependencies\imgui-1.89.4\imgui_widgets.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\allocator.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\clusterizer.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\indexcodec.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\indexgenerator.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\overdrawanalyzer.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\overdrawoptimizer.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\simplifier.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\spatialorder.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\stripifier.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vcacheanalyzer.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vcacheoptimizer.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vertexcodec.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vertexfilter.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vfetchanalyzer.cpp" />
+    <ClCompile Include="dependencies\meshoptimizer-0.19\vfetchoptimizer.cpp" />
+    <ClCompile Include="dependencies\tinyobjloader-release-7212023\tiny_obj_loader.cc" />
     <ClCompile Include="dependencies\vk-bootstrap-0.7\VkBootstrap.cpp" />
     <ClCompile Include="job_system.cpp" />
     <ClCompile Include="main.cpp" />
