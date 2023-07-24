@@ -45,8 +45,12 @@ layout (std430, set = 1, binding = 2) readonly buffer MeshletBuffer
 
 layout (location = 0) out PerVertexData
 {
-  vec3 pos;
+  //vec3 pos;
+  flat vec3 color;
 } v_out[];   // [max_vertices]
+
+const vec3 colors[7] = {vec3(1.0f,0.0f,0.0f), vec3(1.0f,0.5f,0.0f), vec3(1.0f, 1.0f, 0.0f), vec3(0.0f, 1.0f, 0.0f),
+	vec3(0.0f, 0.0f, 1.0f), vec3(0.5f, 0.0f, 1.0f), vec3(1.0f, 0.0f, 0.5f)};
 
 void main() {
 	uint instanceID = gl_WorkGroupID.y; //the y axis used for instances
@@ -60,7 +64,8 @@ void main() {
 	if (vertexID < meshlet.vertexCount) {
 		uint vertexIndex = meshlet.vertices[vertexID];
 		vec4 worldPos = model * vertexBuffer.vertices[vertexIndex].position;
-		v_out[vertexID].pos = worldPos.xyz;
+		//v_out[vertexID].pos = worldPos.xyz;
+		v_out[vertexID].color = colors[meshletID % 7];
 		gl_MeshVerticesEXT[vertexID].gl_Position = transforms.projection * transforms.view * worldPos;
 	}
 	if (primitiveID < primitiveCount) {

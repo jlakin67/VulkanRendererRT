@@ -31,7 +31,7 @@ constexpr const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 constexpr uint32_t INIT_SCR_WIDTH = 1600;
 constexpr uint32_t INIT_SCR_HEIGHT = 900;
 const float Z_NEAR = 0.1f;
-const float Z_FAR = 100.0f;
+const float Z_FAR = 300.0f;
 const float INIT_ASPECT_RATIO = (float)INIT_SCR_WIDTH / (float)INIT_SCR_HEIGHT;
 
 constexpr const float PI = 3.14159265358979323846f;
