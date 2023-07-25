@@ -41,7 +41,7 @@ constexpr double CAMERA_SENSITIVITY = 0.8;
 constexpr double CAMERA_SPEED = 8.0f;
 constexpr double MOUSE_SMOOTHING_FACTOR = 0.5;
 
-constexpr uint32_t FRAME_QUEUE_LENGTH = 2;
+constexpr uint8_t FRAME_QUEUE_LENGTH = 2;
 
 constexpr uint32_t MAX_MESHES = 1000;
 constexpr uint32_t MAX_MESH_INSTANCES = 5000;

@@ -111,6 +111,9 @@
     <ClCompile Include="dependencies\tinyobjloader-release-7212023\tiny_obj_loader.cc">
       <Filter>Dependencies</Filter>
     </ClCompile>
+    <ClCompile Include="stb_image_impl.cpp">
+      <Filter>Dependencies</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="vulkan_renderer.h">

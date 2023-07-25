@@ -319,7 +319,7 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	for (auto it = deletionQueue.begin(); it != deletionQueue.end();) {
 		it->first++;
 		if (it->first == FRAME_QUEUE_LENGTH) {
-			it->second->destroy(allocator);
+			it->second->destroy(device, allocator);
 			delete it->second;
 			it = deletionQueue.erase(it);
 		}
@@ -591,6 +591,7 @@ void loadMeshJob(void* jobArgs) {
 	assert(mesh);
 	VulkanRenderer* renderer = args->renderer;
 	assert(renderer);
+	std::cout << "Loading mesh at " << args->path << std::endl;
 	std::string directory;
 	size_t pos = args->path.find_last_of('/');
 	if (pos != std::string::npos)
@@ -612,25 +613,58 @@ void loadMeshJob(void* jobArgs) {
 		std::cout << "TinyObjReader: " << reader.Warning();
 	}
 
-	std::cout << "Loading mesh at " << args->path << std::endl;
-
 	const tinyobj::attrib_t& attrib = reader.GetAttrib();
 	const std::vector<tinyobj::shape_t>& shapes = reader.GetShapes();
 	const std::vector<tinyobj::material_t>& materials = reader.GetMaterials();
 
-	std::vector<Vertex> unindexedVertices;
-	std::vector<uint32_t> remap;
-	std::vector<Vertex> vertices;
-	std::vector<uint32_t> indices;
+	uint32_t meshIndex = 0;
+	std::vector<std::vector<Vertex>> unindexedMeshVertices;
+	std::vector<tinyobj::material_t> meshMaterials;
+	unindexedMeshVertices.push_back(std::vector<Vertex>());
+	std::vector<std::vector<uint32_t>> meshRemaps;
+	std::vector<std::vector<Vertex>> meshVertices;
+	std::vector<std::vector<uint32_t>> meshIndices;
 	std::vector<Meshlet> meshlets;
+	std::unordered_set<std::string> texNames;
 
 	uint32_t numIndices = 0;
+	size_t maxMeshlets = static_cast<size_t>(renderer->maxPossibleMeshlets);
+	meshopt_Meshlet* meshOptMeshlets = new meshopt_Meshlet[maxMeshlets];
+	uint32_t* meshletVertices = new uint32_t[MESHLET_MAX_VERTICES * maxMeshlets];
+	unsigned char* meshletTriangles = new unsigned char[MESHLET_MAX_INDICES * maxMeshlets];
+
+	bool hasMaterials = false;
+	tinyobj::material_t currentMaterial;
+	if (!materials.empty()) {
+		hasMaterials = true;
+		currentMaterial = materials.at(shapes[0].mesh.material_ids[0]);
+		meshMaterials.push_back(currentMaterial);
+	}
 	for (const tinyobj::shape_t& shape : shapes) {
 		const tinyobj::mesh_t& mesh = shape.mesh;
 		size_t indexOffset = 0;
 		for (int f = 0; f < mesh.num_face_vertices.size(); f++) {
-			Vertex faceVertices[3];
 			bool useFaceNormal = false;
+			bool materialsEquivalent = true;
+			Vertex faceVertices[3];
+			if (hasMaterials) {
+				int materialID = mesh.material_ids[f];
+				const tinyobj::material_t& material = materials.at(materialID);
+				materialsEquivalent = materialsEquivalent && (material.diffuse_texname == currentMaterial.diffuse_texname);
+				materialsEquivalent = materialsEquivalent && (material.specular_texname == currentMaterial.specular_texname);
+				materialsEquivalent = materialsEquivalent && (material.diffuse[0] == currentMaterial.diffuse[0]) &&
+					(material.diffuse[1] == currentMaterial.diffuse[1]) &&
+					(material.diffuse[2] == currentMaterial.diffuse[2]);
+				materialsEquivalent = materialsEquivalent && (material.specular[0] == currentMaterial.specular[0]) &&
+					(material.specular[1] == currentMaterial.specular[1]) &&
+					(material.specular[2] == currentMaterial.specular[2]);
+				if (!materialsEquivalent) { //ensure that each mesh has unique material
+					meshIndex++;
+					unindexedMeshVertices.push_back(std::vector<Vertex>());
+					currentMaterial = material;
+					meshMaterials.push_back(currentMaterial);
+				}
+			}
 			for (int v = 0; v < 3; v++) {
 				tinyobj::index_t idx = mesh.indices[indexOffset + v];
 				Vertex vertex;
@@ -665,55 +699,85 @@ void loadMeshJob(void* jobArgs) {
 				faceVertices[1].normal = glm::vec4(faceNormal, 0.0f);
 				faceVertices[2].normal = glm::vec4(faceNormal, 0.0f);
 			}
-			unindexedVertices.push_back(faceVertices[0]);
-			unindexedVertices.push_back(faceVertices[1]);
-			unindexedVertices.push_back(faceVertices[2]);
+			unindexedMeshVertices.at(meshIndex).push_back(faceVertices[0]);
+			unindexedMeshVertices.at(meshIndex).push_back(faceVertices[1]);
+			unindexedMeshVertices.at(meshIndex).push_back(faceVertices[2]);
 			indexOffset += 3;
 		}
 	}
 
-	size_t indexCount = unindexedVertices.size();
-	remap.resize(indexCount);
-	size_t vertexCount = meshopt_generateVertexRemap(remap.data(), nullptr, indexCount, 
-		unindexedVertices.data(), indexCount, sizeof(Vertex));
-	indices.resize(indexCount);
-	vertices.resize(vertexCount);
-	meshopt_remapIndexBuffer(indices.data(), nullptr, indexCount, remap.data());
-	meshopt_remapVertexBuffer(vertices.data(), unindexedVertices.data(), indexCount, sizeof(Vertex), remap.data());
-	
-	size_t maxMeshlets = static_cast<size_t>(renderer->maxPossibleMeshlets);
-	meshopt_Meshlet* meshOptMeshlets = new meshopt_Meshlet[maxMeshlets];
-	uint32_t* meshletVertices = new uint32_t[MESHLET_MAX_VERTICES * maxMeshlets];
-	unsigned char* meshletTriangles = new unsigned char[MESHLET_MAX_INDICES * maxMeshlets];
-	uint32_t numMeshletsGenerated = meshopt_buildMeshlets(meshOptMeshlets, meshletVertices, meshletTriangles,
-		indices.data(), static_cast<uint32_t>(indexCount), &vertices[0].pos.x, 
-		static_cast<uint32_t>(vertexCount), sizeof(Vertex), MESHLET_MAX_VERTICES, MESHLET_MAX_INDICES / 3, 0.0f);
-	for (uint32_t i = 0; i < numMeshletsGenerated && i < maxMeshlets; i++) {
-		meshopt_Meshlet& meshOptMeshlet = meshOptMeshlets[i];
-		Meshlet meshlet;
-		meshlet.vertexCount = meshOptMeshlet.vertex_count;
-		meshlet.indexCount = meshOptMeshlet.triangle_count*3;
-		for (uint32_t j = 0; j < meshlet.vertexCount; j++) {
-			meshlet.vertices[j] = meshletVertices[j + meshOptMeshlet.vertex_offset];
+	if (hasMaterials) {
+		assert(unindexedMeshVertices.size() == meshMaterials.size());
+		std::vector<VkCommandBuffer>& commandBuffers = renderer->transferCommandPool.getCommandBuffers(2);
+		VkCommandBuffer commandBuffer = commandBuffers.at(1);
+		for (tinyobj::material_t& material : meshMaterials) {
+			if (!material.diffuse_texname.empty()) {
+				VkImage diffuseTexture = VK_NULL_HANDLE;
+				VkImageView diffuseTextureView = VK_NULL_HANDLE;
+			}
 		}
-		for (uint32_t j = 0; j < meshOptMeshlet.triangle_count; j++) {
-			meshlet.indices[3*j] = meshletTriangles[meshOptMeshlet.triangle_offset + 3*j];
-			meshlet.indices[3 * j + 1] = meshletTriangles[meshOptMeshlet.triangle_offset + 3*j + 1];
-			meshlet.indices[3 * j + 2] = meshletTriangles[meshOptMeshlet.triangle_offset + 3*j + 2];
-		}
-		meshlets.push_back(meshlet);
 	}
+
+	uint32_t vertexBufferOffset = 0;
+	for (int m = 0; m < unindexedMeshVertices.size(); m++) {
+		std::vector<Vertex>& unindexedVertices = unindexedMeshVertices.at(m);
+		size_t indexCount = unindexedVertices.size();
+		meshRemaps.push_back(std::vector<uint32_t>());
+		meshVertices.push_back(std::vector<Vertex>());
+		meshIndices.push_back(std::vector<uint32_t>());
+		meshRemaps.at(m).resize(indexCount);
+		size_t vertexCount = meshopt_generateVertexRemap(meshRemaps.at(m).data(), nullptr, indexCount,
+			unindexedVertices.data(), indexCount, sizeof(Vertex));
+		meshIndices.at(m).resize(indexCount);
+		meshVertices.at(m).resize(vertexCount);
+		meshopt_remapIndexBuffer(meshIndices.at(m).data(), nullptr, indexCount, meshRemaps.at(m).data());
+		meshopt_remapVertexBuffer(meshVertices.at(m).data(), unindexedVertices.data(), indexCount, sizeof(Vertex), meshRemaps.at(m).data());
+
+		uint32_t numMeshletsGenerated = meshopt_buildMeshlets(meshOptMeshlets, meshletVertices, meshletTriangles,
+			meshIndices.at(m).data(), static_cast<uint32_t>(indexCount), &(meshVertices.at(m)[0].pos.x),
+			static_cast<uint32_t>(vertexCount), sizeof(Vertex), MESHLET_MAX_VERTICES, MESHLET_MAX_INDICES / 3, 0.0f);
+		tinyobj::material_t material;
+		if (hasMaterials) material = meshMaterials.at(m);
+		for (uint32_t i = 0; i < numMeshletsGenerated && i < maxMeshlets; i++) {
+			meshopt_Meshlet& meshOptMeshlet = meshOptMeshlets[i];
+			Meshlet meshlet;
+			if (hasMaterials) {
+				meshlet.diffuseColor = glm::vec4{ material.diffuse[0], material.diffuse[1], material.diffuse[2], 1.0 };
+				meshlet.specularColor = glm::vec4{ material.specular[0], material.specular[1], material.specular[2], 1.0 };
+			}
+			meshlet.vertexCount = meshOptMeshlet.vertex_count;
+			meshlet.indexCount = meshOptMeshlet.triangle_count * 3;
+			for (uint32_t j = 0; j < meshlet.vertexCount; j++) {
+				meshlet.vertices[j] = meshletVertices[j + meshOptMeshlet.vertex_offset] + vertexBufferOffset;
+			}
+			for (uint32_t j = 0; j < meshOptMeshlet.triangle_count; j++) {
+				meshlet.indices[3 * j] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j];
+				meshlet.indices[3 * j + 1] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j + 1];
+				meshlet.indices[3 * j + 2] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j + 2];
+			}
+			meshlets.push_back(meshlet);
+		}
+		mesh->numMeshlets += numMeshletsGenerated;
+		vertexBufferOffset += vertexCount;
+	}
+	
 	delete[] meshOptMeshlets;
 	delete[] meshletVertices;
 	delete[] meshletTriangles;
-	mesh->numMeshlets = numMeshletsGenerated;
+
+	std::vector<Vertex> outVertices;
+	for (std::vector<Vertex>& vertices : meshVertices) {
+		for (Vertex& vertex : vertices) {
+			outVertices.push_back(vertex);
+		}
+	}
 
 	VkBuffer vertexBuffer = VK_NULL_HANDLE, meshletBuffer = VK_NULL_HANDLE;
 	VmaAllocation vertexBufferAllocation = nullptr, meshletBufferAllocation = nullptr;
 	VkBufferCreateInfo bufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	bufferCreateInfo.size = vertices.size() * sizeof(Vertex);
+	bufferCreateInfo.size = outVertices.size() * sizeof(Vertex);
 	VmaAllocationCreateInfo bufferAllocInfo{};
 	bufferAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 	VK_CHECK(vmaCreateBuffer(renderer->allocator, &bufferCreateInfo, &bufferAllocInfo, &vertexBuffer, &vertexBufferAllocation, nullptr));
@@ -724,12 +788,10 @@ void loadMeshJob(void* jobArgs) {
 	mesh->meshletBuffer = meshletBuffer;
 	mesh->meshletBufferAllocation = meshletBufferAllocation;
 
-	renderer->stageBuffer(vertices.data(), vertices.size()*sizeof(Vertex), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
-		mesh->vertexBuffer, mesh->vertexBufferAllocation);
-	renderer->stageBuffer(meshlets.data(), sizeof(Meshlet) * meshlets.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-		mesh->meshletBuffer, mesh->meshletBufferAllocation);
-	renderer->uploadBuffers();
-	renderer->finalizeBufferUpload();
+	renderer->stageBuffer(outVertices.data(), outVertices.size()*sizeof(Vertex), mesh->vertexBuffer, mesh->vertexBufferAllocation);
+	renderer->stageBuffer(meshlets.data(), sizeof(Meshlet) * meshlets.size(), mesh->meshletBuffer, mesh->meshletBufferAllocation);
+	renderer->uploadResources();
+	renderer->finalizeResourceUpload();
 
 	delete args;
 
@@ -773,15 +835,15 @@ void VulkanRenderer::shutDown() {
 	destroyImgui();
 	vkDestroyFence(device, stagingBufferFence, nullptr);
 	for (Mesh* mesh : pendingMeshes) { //should be empty
-		mesh->destroy(allocator);
+		mesh->destroy(device, allocator);
 		delete mesh;
 	}
 	for (auto& pair : deletionQueue) { //may or may not be empty
-		pair.second->destroy(allocator);
+		pair.second->destroy(device, allocator);
 		delete pair.second;
 	}
 	for (auto& pair : meshes) {
-		pair.second->destroy(allocator);
+		pair.second->destroy(device, allocator);
 		delete pair.second;
 	}
 	vkDestroySemaphore(device, transferSemaphore, nullptr);
@@ -1239,10 +1301,12 @@ void VulkanRenderer::initStaticDescriptorSets() {
 		descriptorWrite.pBufferInfo = &descriptorBufInfo;
 		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 	}
-	
+	for (uint32_t i = 0; i < MAX_TEXTURES; i++) {
+		freeTextureIndices.insert(i);
+	}
 }
 
-void VulkanRenderer::stageBuffer(const void* srcData, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer outBuffer, VmaAllocation outAllocation) {
+void VulkanRenderer::stageBuffer(const void* srcData, VkDeviceSize size, VkBuffer outBuffer, VmaAllocation outAllocation) {
 	VkBufferCreateInfo bufferCreateInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	bufferCreateInfo.size = size;
 	bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -1258,36 +1322,93 @@ void VulkanRenderer::stageBuffer(const void* srcData, VkDeviceSize size, VkBuffe
 	VK_CHECK(vmaMapMemory(allocator, stagingBufferAllocation, &stagingBufferPtr));
 	memcpy(stagingBufferPtr, srcData, size);
 	vmaUnmapMemory(allocator, stagingBufferAllocation);
-	BufferInfo bufferInfo{ outBuffer, usage };
-	bufferInfos.push_back(bufferInfo);
-	stagingBuffers.push_back(stagingBuffer);
-	stagingBufferAllocations.push_back(stagingBufferAllocation);
-	stagingBufferSizes.push_back(size);
+	StagingBufferInfo info{ stagingBuffer, stagingBufferAllocation, size };
+	info.backingBuffer = outBuffer;
+	stagingBufferInfos.push_back(info);
 }
 
-void VulkanRenderer::uploadBuffers() {
+void VulkanRenderer::stageImage(const void* srcData, VkDeviceSize size, VkImage outImage, VmaAllocation outAllocation,
+	VkOffset3D imageOffset, VkExtent3D imageExtent, VkImageSubresourceLayers imageSubresource) {
+	VkBufferCreateInfo bufferCreateInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	bufferCreateInfo.size = size;
+	bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VmaAllocationCreateInfo allocationCreateInfo{};
+	allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+	allocationCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+	VkBuffer stagingBuffer = VK_NULL_HANDLE;
+	VmaAllocation stagingBufferAllocation = nullptr;
+	VK_CHECK(vmaCreateBuffer(allocator, &bufferCreateInfo, &allocationCreateInfo, &stagingBuffer,
+		&stagingBufferAllocation, nullptr));
+	void* stagingBufferPtr = nullptr;
+	VK_CHECK(vmaMapMemory(allocator, stagingBufferAllocation, &stagingBufferPtr));
+	memcpy(stagingBufferPtr, srcData, size);
+	vmaUnmapMemory(allocator, stagingBufferAllocation);
+	StagingBufferInfo info{ stagingBuffer, stagingBufferAllocation, size };
+	info.backingImage = outImage;
+	info.imageOffset = imageOffset;
+	info.imageExtent = imageExtent;
+	info.imageSubresource = imageSubresource;
+	stagingBufferInfos.push_back(info);
+}
+
+void VulkanRenderer::uploadResources() {
 	//do all the copy commands and queue transfer memory barriers and then submit using fence and semaphore
 	static std::vector<VkBufferMemoryBarrier> bufferMemoryBarriers;
+	static std::vector<VkImageMemoryBarrier> imageMemoryBarriers;
 	bufferMemoryBarriers.clear();
+	imageMemoryBarriers.clear();
 	std::vector<VkCommandBuffer>& commandBuffers = transferCommandPool.getCommandBuffers(1);
 	VkCommandBuffer commandBuffer = commandBuffers.at(0);
 	VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
-	for (int i = 0; i < stagingBuffers.size(); i++) {
-		VkBufferCopy bufferCopy{};
-		bufferCopy.size = stagingBufferSizes.at(i);
-		vkCmdCopyBuffer(commandBuffer, stagingBuffers.at(i), bufferInfos.at(i).buffer, 1, &bufferCopy);
-		VkBufferMemoryBarrier bufferMemoryBarrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-		bufferMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-		bufferMemoryBarrier.srcQueueFamilyIndex = transferQueueIndex;
-		bufferMemoryBarrier.dstQueueFamilyIndex = graphicsQueueIndex;
-		bufferMemoryBarrier.buffer = bufferInfos.at(i).buffer;
-		bufferMemoryBarrier.size = VK_WHOLE_SIZE;
-		bufferMemoryBarriers.push_back(bufferMemoryBarrier);
+	for (const StagingBufferInfo& info : stagingBufferInfos) {
+		if (info.backingBuffer != VK_NULL_HANDLE) {
+			VkBufferCopy bufferCopy{};
+			bufferCopy.size = info.size;
+			vkCmdCopyBuffer(commandBuffer, info.buffer, info.backingBuffer, 1, &bufferCopy);
+			VkBufferMemoryBarrier bufferMemoryBarrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+			bufferMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			bufferMemoryBarrier.srcQueueFamilyIndex = transferQueueIndex;
+			bufferMemoryBarrier.dstQueueFamilyIndex = graphicsQueueIndex;
+			bufferMemoryBarrier.buffer = info.backingBuffer;
+			bufferMemoryBarrier.size = VK_WHOLE_SIZE;
+			bufferMemoryBarriers.push_back(bufferMemoryBarrier);
+		}
+		if (info.backingImage != VK_NULL_HANDLE) {
+			VkBufferImageCopy bufferImageCopy{};
+			bufferImageCopy.imageExtent = info.imageExtent;
+			bufferImageCopy.imageOffset = info.imageOffset;
+			bufferImageCopy.imageSubresource = info.imageSubresource;
+			bufferImageCopy.bufferOffset = 0;
+			bufferImageCopy.bufferImageHeight = 0;
+			bufferImageCopy.bufferRowLength = 0;
+			vkCmdCopyBufferToImage(commandBuffer, info.buffer, info.backingImage, 
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bufferImageCopy);
+			VkImageMemoryBarrier imageMemoryBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			imageMemoryBarrier.srcQueueFamilyIndex = transferQueueIndex;
+			imageMemoryBarrier.dstQueueFamilyIndex = graphicsQueueIndex;
+			imageMemoryBarrier.image = info.backingImage;
+			imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageMemoryBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			imageMemoryBarrier.subresourceRange.baseMipLevel = info.imageSubresource.mipLevel;
+			imageMemoryBarrier.subresourceRange.levelCount = 1;
+			imageMemoryBarrier.subresourceRange.baseArrayLayer = info.imageSubresource.baseArrayLayer;
+			imageMemoryBarrier.subresourceRange.layerCount = info.imageSubresource.layerCount;
+			imageMemoryBarriers.push_back(imageMemoryBarrier);
+		}
 	}
-	vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
-		static_cast<uint32_t>(bufferMemoryBarriers.size()), bufferMemoryBarriers.data(), 0, nullptr);
+	VkBufferMemoryBarrier* pBufferBarriers = nullptr;
+	VkImageMemoryBarrier* pImageBarriers = nullptr;
+	if (!bufferMemoryBarriers.empty()) pBufferBarriers = bufferMemoryBarriers.data();
+	if (!imageMemoryBarriers.empty()) pImageBarriers = imageMemoryBarriers.data();
+	vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 
+		0, nullptr,
+		static_cast<uint32_t>(bufferMemoryBarriers.size()), pBufferBarriers, 
+		static_cast<uint32_t>(imageMemoryBarriers.size()), pImageBarriers);
 	VK_CHECK(vkEndCommandBuffer(commandBuffer));
 	VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	//std::cout << "Transfer semaphore signalled\n";
@@ -1298,16 +1419,13 @@ void VulkanRenderer::uploadBuffers() {
 	VK_CHECK(vkQueueSubmit(transferQueue, 1, &submitInfo, stagingBufferFence));
 }
 
-void VulkanRenderer::finalizeBufferUpload() {
+void VulkanRenderer::finalizeResourceUpload() {
 	vkWaitForFences(device, 1, &stagingBufferFence, VK_TRUE, UINT64_MAX);
 	VK_CHECK(vkResetFences(device, 1, &stagingBufferFence));
-	for (int i = 0; i < stagingBuffers.size(); i++) {
-		vmaDestroyBuffer(allocator, stagingBuffers.at(i), stagingBufferAllocations.at(i));
+	for (int i = 0; i < stagingBufferInfos.size(); i++) {
+		vmaDestroyBuffer(allocator, stagingBufferInfos.at(i).buffer, stagingBufferInfos.at(i).allocation);
 	}
-	stagingBuffers.clear();
-	stagingBufferAllocations.clear();
-	stagingBufferSizes.clear();
-	bufferInfos.clear();
+	stagingBufferInfos.clear();
 }
 
 void VulkanRenderer::updateDynamicBuffer(DynamicBufferUploadJobArgs jobArgs) {
@@ -1329,10 +1447,9 @@ void VulkanRenderer::updateDynamicBuffer(DynamicBufferUploadJobArgs jobArgs) {
 		bufferUploadJob.jobArgs = &jobArgs;
 		bufferUploadJob.func = [this](void* jobArgs) {
 			DynamicBufferUploadJobArgs* uploadJobArgs = reinterpret_cast<DynamicBufferUploadJobArgs*>(jobArgs);
-			stageBuffer(uploadJobArgs->data, uploadJobArgs->size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, uploadJobArgs->buffer,
-				uploadJobArgs->bufferAlloc);
-			uploadBuffers();
-			finalizeBufferUpload();
+			stageBuffer(uploadJobArgs->data, uploadJobArgs->size, uploadJobArgs->buffer, uploadJobArgs->bufferAlloc);
+			uploadResources();
+			finalizeResourceUpload();
 		};
 		uploadedDynamicBuffers = true;
 		ioThread.jobQueue.pushJob(bufferUploadJob);
@@ -1373,8 +1490,7 @@ void VulkanRenderer::uploadTestCube() {
 			vertex.pos.w = cubeVertices[4 * i + 3];
 			vertices.push_back(vertex);
 		}
-		stageBuffer(vertices.data(), sizeof(Vertex)*vertices.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
-			mesh->vertexBuffer, mesh->vertexBufferAllocation);
+		stageBuffer(vertices.data(), sizeof(Vertex)*vertices.size(), mesh->vertexBuffer, mesh->vertexBufferAllocation);
 		Meshlet meshlet;
 		meshlet.vertexCount = 8;
 		for (int i = 0; i < 8; i++) {
@@ -1390,9 +1506,9 @@ void VulkanRenderer::uploadTestCube() {
 		for (int i = 36; i < MESHLET_MAX_INDICES; i++) {
 			meshlet.indices[i] = 0;
 		}
-		stageBuffer(&meshlet, sizeof(meshlet), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, mesh->meshletBuffer, mesh->meshletBufferAllocation);
-		uploadBuffers();
-		finalizeBufferUpload();
+		stageBuffer(&meshlet, sizeof(meshlet), mesh->meshletBuffer, mesh->meshletBufferAllocation);
+		uploadResources();
+		finalizeResourceUpload();
 	};
 	uploadedMeshes = true;
 	ioThread.jobQueue.pushJob(uploadTestCubeJob);

@@ -35,14 +35,14 @@ layout (std430, set = 2, binding = 1) readonly buffer VertexBuffer {
 
 struct Meshlet
 {
-  uint vertices[MAX_MESHLET_VERTICES];
-  uint indices[MAX_MESHLET_INDICES];
   uint vertexCount;
   uint indexCount;
   int diffuseIndex;
   int specularIndex;
   vec4 diffuseColor;
   vec4 specularColor;
+  uint vertices[MAX_MESHLET_VERTICES];
+  uint indices[MAX_MESHLET_INDICES];
 };
 
 layout (std430, set = 2, binding = 2) readonly buffer MeshletBuffer
