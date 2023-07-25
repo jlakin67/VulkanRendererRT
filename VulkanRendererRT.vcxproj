@@ -193,6 +193,8 @@
     <ClInclude Include="vulkan_renderer.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="shaders\default.frag" />
+    <None Include="shaders\default.mesh" />
     <None Include="shaders\test.mesh" />
     <None Include="shaders\test.frag" />
   </ItemGroup>

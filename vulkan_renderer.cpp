@@ -49,6 +49,7 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	VkPhysicalDeviceVulkan12Features deviceFeatures12{};
 	deviceFeatures12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 	deviceFeatures12.runtimeDescriptorArray = VK_TRUE;
+	deviceFeatures12.descriptorBindingVariableDescriptorCount = VK_TRUE;
 	deviceFeatures12.descriptorBindingPartiallyBound = VK_TRUE;
 	deviceFeatures12.samplerFilterMinmax = VK_TRUE;
 	deviceFeatures12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE; //ray tracing shaders need to sample textures from any object
@@ -116,7 +117,7 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	commandPoolCreateInfo.queueFamilyIndex = transferQueueIndex;
 	transferCommandPool.create(device, commandPoolCreateInfo, VK_COMMAND_BUFFER_LEVEL_PRIMARY);
 
-	std::vector<VkDescriptorPoolSize> poolSizes = {
+	std::vector<VkDescriptorPoolSize> defaultPoolSizes = {
 		{
 			VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 			10
@@ -126,7 +127,13 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 			1000
 		}
 	};
-	defaultDescriptorAllocator.create(device, 0, 1000, poolSizes);
+	defaultDescriptorAllocator.create(device, 0, 1000, defaultPoolSizes);
+
+	std::vector<VkDescriptorPoolSize> bindlessPoolSizes = {
+		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, FRAME_QUEUE_LENGTH * MAX_TEXTURES }
+	};
+	bindlessDescriptorAllocator.create(device, VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT, 
+		FRAME_QUEUE_LENGTH, bindlessPoolSizes);
 
 	chooseDefaultDepthFormat();
 
@@ -145,7 +152,7 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	VkFenceCreateInfo fenceCreateInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	VK_CHECK(vkCreateFence(device, &fenceCreateInfo, nullptr, &stagingBufferFence));
 
-	initTransforms();
+	initStaticDescriptorSets();
 
 	uploadTestCube();
 
@@ -507,10 +514,12 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayouts[Graphics_Default],
 		0, 1, &transformsDescriptorSets[currentFrame], 0, nullptr);
+	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayouts[Graphics_Default],
+		1, 1, &materialsDescriptorSets[currentFrame], 0, nullptr);
 	for (auto& pair : meshes) {
 		Mesh* mesh = pair.second;
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayouts[Graphics_Default],
-			1, 1, &(mesh->descriptorSet[currentFrame]), 0, nullptr);
+			2, 1, &(mesh->descriptorSet[currentFrame]), 0, nullptr);
 		vkCmdDrawMeshTasks(commandBuffer, mesh->numMeshlets, static_cast<uint32_t>(mesh->models.size()), 1);
 	}
 	
@@ -620,19 +629,45 @@ void loadMeshJob(void* jobArgs) {
 		const tinyobj::mesh_t& mesh = shape.mesh;
 		size_t indexOffset = 0;
 		for (int f = 0; f < mesh.num_face_vertices.size(); f++) {
+			Vertex faceVertices[3];
+			bool useFaceNormal = false;
 			for (int v = 0; v < 3; v++) {
 				tinyobj::index_t idx = mesh.indices[indexOffset + v];
 				Vertex vertex;
-				vertex.pos.x = attrib.vertices[3 * size_t(idx.vertex_index) + 0];
+				vertex.pos.x = attrib.vertices[3 * size_t(idx.vertex_index)];
 				vertex.pos.y = attrib.vertices[3 * size_t(idx.vertex_index) + 1];
 				vertex.pos.z = attrib.vertices[3 * size_t(idx.vertex_index) + 2];
 				vertex.pos.w = 1.0f;
 
 				// Check if `normal_index` is zero or positive. negative = no normal data
-				// Check if `texcoord_index` is zero or positive. negative = no texcoord data
+				if (idx.normal_index >= 0) {
+					vertex.normal.x = attrib.normals[3 * size_t(idx.normal_index)];
+					vertex.normal.y = attrib.normals[3 * size_t(idx.normal_index) + 1];
+					vertex.normal.z = attrib.normals[3 * size_t(idx.normal_index) + 2];
+					vertex.normal.w = 0.0f;
+				}
+				else useFaceNormal = true;
 
-				unindexedVertices.push_back(vertex);
+				// Check if `texcoord_index` is zero or positive. negative = no texcoord data
+				if (idx.texcoord_index >= 0) {
+					vertex.texCoord.x = attrib.texcoords[2 * size_t(idx.texcoord_index)];
+					vertex.texCoord.y = attrib.texcoords[2 * size_t(idx.texcoord_index) + 1];
+				}
+
+				faceVertices[v] = vertex;
 			}
+			if (useFaceNormal) {
+				glm::vec3 v1 = faceVertices[1].pos - faceVertices[0].pos;
+				glm::vec3 v2 = faceVertices[2].pos - faceVertices[0].pos;
+				glm::vec3 faceNormal = glm::cross(v1, v2);
+				faceNormal = glm::normalize(faceNormal);
+				faceVertices[0].normal = glm::vec4(faceNormal, 0.0f);
+				faceVertices[1].normal = glm::vec4(faceNormal, 0.0f);
+				faceVertices[2].normal = glm::vec4(faceNormal, 0.0f);
+			}
+			unindexedVertices.push_back(faceVertices[0]);
+			unindexedVertices.push_back(faceVertices[1]);
+			unindexedVertices.push_back(faceVertices[2]);
 			indexOffset += 3;
 		}
 	}
@@ -758,9 +793,11 @@ void VulkanRenderer::shutDown() {
 	}
 	vkDestroyDescriptorSetLayout(device, meshLayout, nullptr);
 	vkDestroyDescriptorSetLayout(device, transformsLayout, nullptr);
+	vkDestroyDescriptorSetLayout(device, materialsLayout, nullptr);
 	graphicsCommandPool.destroy();
 	transferCommandPool.destroy();
 	defaultDescriptorAllocator.destroy();
+	bindlessDescriptorAllocator.destroy();
 	for (int i = 0; i < numRenderPasses; i++) {
 		vkDestroyRenderPass(device, renderPasses[i], nullptr);
 	}
@@ -963,9 +1000,28 @@ void VulkanRenderer::createDescriptorLayouts() {
 	meshDescriptorLayoutInfo.bindingCount = 3;
 	meshDescriptorLayoutInfo.pBindings = meshBindings;
 	VK_CHECK(vkCreateDescriptorSetLayout(device, &meshDescriptorLayoutInfo, nullptr, &meshLayout));
+	VkDescriptorSetLayoutCreateInfo materialDescriptorLayoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+	VkDescriptorSetLayoutBinding materialBindings[1];
+	materialBindings[0].binding = 0;
+	materialBindings[0].descriptorCount = MAX_TEXTURES;
+	materialBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	materialBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	materialBindings[0].pImmutableSamplers = nullptr;
+	materialDescriptorLayoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+	materialDescriptorLayoutInfo.bindingCount = 1;
+	materialDescriptorLayoutInfo.pBindings = materialBindings;
+	VkDescriptorSetLayoutBindingFlagsCreateInfo 
+		bindingFlagsInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO };
+	VkDescriptorBindingFlags bindingFlags[1];
+	bindingFlags[0] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+		| VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+	bindingFlagsInfo.bindingCount = 1;
+	bindingFlagsInfo.pBindingFlags = bindingFlags;
+	materialDescriptorLayoutInfo.pNext = &bindingFlagsInfo;
+	VK_CHECK(vkCreateDescriptorSetLayout(device, &materialDescriptorLayoutInfo, nullptr, &materialsLayout));
 	VkPipelineLayoutCreateInfo defaultPipelineLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-	VkDescriptorSetLayout setLayouts[2] = { transformsLayout, meshLayout };
-	defaultPipelineLayoutInfo.setLayoutCount = 2;
+	VkDescriptorSetLayout setLayouts[3] = { transformsLayout, materialsLayout, meshLayout };
+	defaultPipelineLayoutInfo.setLayoutCount = 3;
 	defaultPipelineLayoutInfo.pSetLayouts = setLayouts;
 	VK_CHECK(vkCreatePipelineLayout(device, &defaultPipelineLayoutInfo, nullptr, &pipelineLayouts[Graphics_Default]));
 }
@@ -1064,8 +1120,8 @@ void VulkanRenderer::buildDefaultPipeline(const void* initialData, size_t initia
 	cacheCreateInfo.pInitialData = initialData;
 	VK_CHECK(vkCreatePipelineCache(device, &cacheCreateInfo, nullptr, &pipelineCache));
 	GraphicsPipelineBuilder defaultPipelineBuilder{ device };
-	defaultPipelineBuilder.addShaderStage(VK_SHADER_STAGE_MESH_BIT_EXT, "shaders/test.mesh.spv");
-	defaultPipelineBuilder.addShaderStage(VK_SHADER_STAGE_FRAGMENT_BIT, "shaders/test.frag.spv");
+	defaultPipelineBuilder.addShaderStage(VK_SHADER_STAGE_MESH_BIT_EXT, "shaders/default.mesh.spv");
+	defaultPipelineBuilder.addShaderStage(VK_SHADER_STAGE_FRAGMENT_BIT, "shaders/default.frag.spv");
 	defaultPipelineBuilder.addDynamicState(VK_DYNAMIC_STATE_VIEWPORT);
 	defaultPipelineBuilder.addDynamicState(VK_DYNAMIC_STATE_SCISSOR);
 	defaultPipelineBuilder.setViewportScissors(1, nullptr, 1, nullptr);
@@ -1149,7 +1205,7 @@ void VulkanRenderer::destroyImgui() {
 	vkDestroyDescriptorPool(device, imguiDescriptorPool, nullptr);
 }
 
-void VulkanRenderer::initTransforms() {
+void VulkanRenderer::initStaticDescriptorSets() {
 	VkBufferCreateInfo bufCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	bufCreateInfo.size = sizeof(UniformMatrices);
 	bufCreateInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -1159,10 +1215,16 @@ void VulkanRenderer::initTransforms() {
 	allocCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
 		VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT |
 		VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	VkDescriptorSetVariableDescriptorCountAllocateInfo 
+		variableDescriptorAllocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO };
+	uint32_t descriptorCount = MAX_TEXTURES;
+	variableDescriptorAllocInfo.descriptorSetCount = 1;
+	variableDescriptorAllocInfo.pDescriptorCounts = &descriptorCount;
 	for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
 		VK_CHECK(vmaCreateBuffer(allocator, &bufCreateInfo, &allocCreateInfo, &transformsBuffers[i],
 			&transformsBufferAllocations[i], &transformsBufferAllocationInfos[i]));
 		defaultDescriptorAllocator.allocateSet(transformsLayout, nullptr, transformsDescriptorSets[i]);
+		bindlessDescriptorAllocator.allocateSet(materialsLayout, &variableDescriptorAllocInfo, materialsDescriptorSets[i]);
 		VkWriteDescriptorSet descriptorWrite{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
 		descriptorWrite.dstSet = transformsDescriptorSets[i];
 		descriptorWrite.dstBinding = 0;
@@ -1284,7 +1346,7 @@ void VulkanRenderer::uploadTestCube() {
 	VkBufferCreateInfo bufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	bufferCreateInfo.size = sizeof(cubeVertices);
+	bufferCreateInfo.size = 8*sizeof(Vertex);
 	VmaAllocationCreateInfo bufferAllocInfo{};
 	bufferAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 	VK_CHECK(vmaCreateBuffer(allocator, &bufferCreateInfo, &bufferAllocInfo, &vertexBuffer, &vertexBufferAllocation, nullptr));
@@ -1302,7 +1364,17 @@ void VulkanRenderer::uploadTestCube() {
 	uploadTestCubeJob.func = [this](void* jobArgs) {
 		Mesh* mesh = reinterpret_cast<Mesh*>(jobArgs);
 		mesh->numMeshlets = 1;
-		stageBuffer(cubeVertices, sizeof(cubeVertices), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, mesh->vertexBuffer, mesh->vertexBufferAllocation);
+		std::vector<Vertex> vertices;
+		for (int i = 0; i < 8; i++) {
+			Vertex vertex;
+			vertex.pos.x = cubeVertices[4 * i];
+			vertex.pos.y = cubeVertices[4 * i + 1];
+			vertex.pos.z = cubeVertices[4 * i + 2];
+			vertex.pos.w = cubeVertices[4 * i + 3];
+			vertices.push_back(vertex);
+		}
+		stageBuffer(vertices.data(), sizeof(Vertex)*vertices.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
+			mesh->vertexBuffer, mesh->vertexBufferAllocation);
 		Meshlet meshlet;
 		meshlet.vertexCount = 8;
 		for (int i = 0; i < 8; i++) {

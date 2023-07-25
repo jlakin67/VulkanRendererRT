@@ -1,0 +1,90 @@
+#version 460 core
+#extension GL_EXT_mesh_shader : require
+
+//layout( local_size_x_id=0 ) in;
+
+//one workgroup per meshlet, per instance
+//each thread operates on one vertex and outputs one primitive (triangle) in the meshlet
+
+const uint MAX_MESHLET_VERTICES = 32;
+const uint MAX_MESHLET_PRIMITIVES = 32;
+const uint MAX_MESHLET_INDICES = MAX_MESHLET_PRIMITIVES * 3;
+
+layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
+layout(triangles, max_vertices = MAX_MESHLET_VERTICES, max_primitives = MAX_MESHLET_PRIMITIVES) out;
+
+layout (std140, set = 0, binding = 0) uniform Transforms { 
+  mat4 view;
+  mat4 projection;
+} transforms;
+
+layout (std140, set = 2, binding = 0) readonly buffer Instances { 
+  mat4 models[];
+} instances;
+
+struct Vertex {
+  vec4 position;
+  vec4 normal;
+  vec2 texCoord;
+  vec2 pad;
+};
+
+layout (std430, set = 2, binding = 1) readonly buffer VertexBuffer {
+  Vertex vertices[];
+} vertexBuffer;
+
+struct Meshlet
+{
+  uint vertices[MAX_MESHLET_VERTICES];
+  uint indices[MAX_MESHLET_INDICES];
+  uint vertexCount;
+  uint indexCount;
+  int diffuseIndex;
+  int specularIndex;
+  vec4 diffuseColor;
+  vec4 specularColor;
+};
+
+layout (std430, set = 2, binding = 2) readonly buffer MeshletBuffer
+{
+  Meshlet meshlets[];
+} meshletBuffer;
+
+layout (location = 0) out PerVertexData
+{
+  vec3 pos;
+  vec3 normal;
+  vec2 texCoord;
+  flat int diffuseIndex;
+  flat int specularIndex;
+  flat vec4 diffuseColor;
+  flat vec4 specularColor;
+} v_out[];   // [max_vertices]
+
+void main() {
+	uint instanceID = gl_WorkGroupID.y; //the y axis used for instances
+	mat4 model = instances.models[instanceID];
+	mat4 invTranspose = inverse(transpose(model));
+	uint meshletID = gl_WorkGroupID.x;
+	Meshlet meshlet = meshletBuffer.meshlets[meshletID];
+	uint vertexID = gl_LocalInvocationID.x;
+	uint primitiveID = gl_LocalInvocationID.x;
+	uint primitiveCount = meshlet.indexCount / 3;
+	SetMeshOutputsEXT(meshlet.vertexCount, primitiveCount);
+	if (vertexID < meshlet.vertexCount) {
+		uint vertexIndex = meshlet.vertices[vertexID];
+		vec4 worldPos = model * vertexBuffer.vertices[vertexIndex].position;
+		v_out[vertexID].pos = worldPos.xyz;
+		v_out[vertexID].normal = (invTranspose * vertexBuffer.vertices[vertexIndex].normal).xyz;
+		v_out[vertexID].texCoord = vertexBuffer.vertices[vertexIndex].texCoord;
+		v_out[vertexID].diffuseIndex = meshlet.diffuseIndex;
+		v_out[vertexID].specularIndex = meshlet.specularIndex;
+		v_out[vertexID].diffuseColor = meshlet.diffuseColor;
+		v_out[vertexID].specularColor = meshlet.specularColor;
+		gl_MeshVerticesEXT[vertexID].gl_Position = transforms.projection * transforms.view * worldPos;
+	}
+	if (primitiveID < primitiveCount) {
+		uvec3 triangleIndices = uvec3(meshlet.indices[3*primitiveID], meshlet.indices[3*primitiveID+1], meshlet.indices[3*primitiveID+2]);
+		gl_PrimitiveTriangleIndicesEXT[primitiveID] = triangleIndices;
+	}
+}

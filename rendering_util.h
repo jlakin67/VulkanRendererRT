@@ -31,8 +31,8 @@ public:
 	//being allocated that contains one.
 	//The variable descriptor array must occupy the furthest binding number in the set.
 	//The descriptor layout must have been created with VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT flag and pNext
-	//containing a VkDescriptorSetLayoutBindingFlagsCreateInfo for the variable array with flags equal to VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT 
-	//| VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT.
+	//containing a VkDescriptorSetLayoutBindingFlagsCreateInfo for the variable array with flags equal to VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT 
+	//| VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT.
 	void allocateSet(VkDescriptorSetLayout descriptorSetLayout, VkDescriptorSetVariableDescriptorCountAllocateInfo* variableDescriptorAllocInfo,
 		VkDescriptorSet& dstSet);
 private:

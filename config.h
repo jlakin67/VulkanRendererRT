@@ -30,9 +30,9 @@ constexpr const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
 constexpr uint32_t INIT_SCR_WIDTH = 1600;
 constexpr uint32_t INIT_SCR_HEIGHT = 900;
-const float Z_NEAR = 0.1f;
-const float Z_FAR = 300.0f;
-const float INIT_ASPECT_RATIO = (float)INIT_SCR_WIDTH / (float)INIT_SCR_HEIGHT;
+constexpr const float Z_NEAR = 0.1f;
+constexpr const float Z_FAR = 300.0f;
+constexpr const float INIT_ASPECT_RATIO = (float)INIT_SCR_WIDTH / (float)INIT_SCR_HEIGHT;
 
 constexpr const float PI = 3.14159265358979323846f;
 constexpr const float TWO_PI = 2.0f * PI;
@@ -50,5 +50,6 @@ constexpr uint32_t MESHLET_MAX_VERTICES = 32;
 constexpr uint32_t MESHLET_MAX_INDICES = MESHLET_MAX_VERTICES * 3;
 
 constexpr uint32_t MAX_MODELS = 500; //allocate this many model matrices at a time
+constexpr uint32_t MAX_TEXTURES = 5000;
 
 constexpr uint32_t NUM_FRAME_TIME_SAMPLES = 100;

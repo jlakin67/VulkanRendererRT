@@ -26,15 +26,22 @@ enum PipelineNames {
 constexpr uint32_t numPipelineCaches = numPipelines + 1; //one included for ImGui
 
 struct Vertex {
-	glm::vec4 pos;
+	glm::vec4 pos{0.0f};
+	glm::vec4 normal{ 0.0f };
+	glm::vec2 texCoord{ 0.0f };
+	glm::vec2 pad{ 0.0f };
 };
 
 struct Meshlet
 {
 	uint32_t vertices[MESHLET_MAX_VERTICES];
 	uint32_t indices[MESHLET_MAX_INDICES]; // 32 triangles
-	uint32_t vertexCount;
-	uint32_t indexCount;
+	uint32_t vertexCount = 0;
+	uint32_t indexCount = 0;
+	int32_t diffuseIndex = -1;
+	int32_t specularIndex = -1;
+	glm::vec4 diffuseColor{ 1.0f, 0.0f, 0.0f, 1.0f };
+	glm::vec4 specularColor{ 1.0f, 1.0f, 1.0f, 1.0f };
 };
 
 struct Mesh {
@@ -101,6 +108,7 @@ public:
 			presentSemaphores[i] = VK_NULL_HANDLE;
 			frameQueueFences[i] = VK_NULL_HANDLE;
 			transformsDescriptorSets[i] = VK_NULL_HANDLE;
+			materialsDescriptorSets[i] = VK_NULL_HANDLE;
 			uniformMatrices[i] = UniformMatrices{
 				glm::mat4{ 1.0f },
 				glm::perspective(CAMERA_FOV_Y, INIT_ASPECT_RATIO, Z_NEAR, Z_FAR)
@@ -129,6 +137,7 @@ private:
 	//CommandPool auxGraphicsCommandPool[numAuxGraphicsCommandPools];
 	CommandPool transferCommandPool; //used by exactly one worker thread
 	DescriptorAllocator defaultDescriptorAllocator;
+	DescriptorAllocator bindlessDescriptorAllocator;
 	VkSemaphore acquireSemaphores[FRAME_QUEUE_LENGTH];
 	VkSemaphore presentSemaphores[FRAME_QUEUE_LENGTH];
 	VkFence frameQueueFences[FRAME_QUEUE_LENGTH];
@@ -173,6 +182,7 @@ private:
 
 	VkDescriptorSetLayout transformsLayout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout meshLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout materialsLayout = VK_NULL_HANDLE;
 	VkPipelineLayout pipelineLayouts[numPipelines];
 	void createDescriptorLayouts();
 
@@ -195,7 +205,8 @@ private:
 	VmaAllocation transformsBufferAllocations[FRAME_QUEUE_LENGTH];
 	VmaAllocationInfo transformsBufferAllocationInfos[FRAME_QUEUE_LENGTH];
 	VkDescriptorSet transformsDescriptorSets[FRAME_QUEUE_LENGTH];
-	void initTransforms();
+	VkDescriptorSet materialsDescriptorSets[FRAME_QUEUE_LENGTH];
+	void initStaticDescriptorSets();
 
 	struct BufferInfo {
 		VkBuffer buffer = VK_NULL_HANDLE;

@@ -142,5 +142,11 @@
     <None Include="shaders\test.frag">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="shaders\default.mesh">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\default.frag">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>
