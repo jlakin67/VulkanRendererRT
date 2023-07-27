@@ -8,6 +8,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include "util.h"
+#include <mutex>
+#include <set>
 
 struct UniformMatrices {
 	glm::mat4 view;
@@ -207,6 +209,31 @@ private:
 	VkPipelineMultisampleStateCreateInfo multisampleStateCreateInfo{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
 	VkPipelineDepthStencilStateCreateInfo depthStencilStateCreateInfo{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
 	VkPipelineColorBlendStateCreateInfo colorBlendStateCreateInfo{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+};
+
+class TextureIndexPool {
+	std::mutex lock;
+	std::set<uint32_t> freeTextureIndices; //indices that are unused in the bindless texture descriptor set
+public:
+	void init() {
+		for (uint32_t i = 0; i < MAX_TEXTURES; i++) {
+			freeTextureIndices.insert(i);
+		}
+	}
+	int32_t getTextureIndex() {
+		std::unique_lock<std::mutex> acquiredLock(lock);
+		auto it = freeTextureIndices.begin();
+		if (it == freeTextureIndices.end()) return -1;
+		else {
+			int32_t ret = *it;
+			freeTextureIndices.erase(it);
+			return ret;
+		}
+	}
+	void freeTextureIndex(int32_t index) {
+		std::unique_lock<std::mutex> acquiredLock(lock);
+		if (index >= 0 && index < MAX_TEXTURES) freeTextureIndices.insert(index);
+	}
 };
 
 extern const float cubeVertices[32];

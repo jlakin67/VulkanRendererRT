@@ -37,18 +37,27 @@ struct Meshlet
 {
 	uint32_t vertexCount = 0;
 	uint32_t indexCount = 0;
-	int32_t diffuseIndex = -1;
-	int32_t specularIndex = -1;
+	int32_t diffuseIndex = -1; //index into bindless buffer
+	int32_t specularIndex = -1; //index into bindless buffer
 	glm::vec4 diffuseColor{ 1.0f, 0.0f, 0.0f, 1.0f };
 	glm::vec4 specularColor{ 1.0f, 1.0f, 1.0f, 1.0f };
 	uint32_t vertices[MESHLET_MAX_VERTICES];
 	uint32_t indices[MESHLET_MAX_INDICES]; // 32 triangles
 };
 
+constexpr const uint32_t TEXTURE_DIFFUSE_BIT = 1 << 0;
+constexpr const uint32_t TEXTURE_SPECULAR_BIT = 1 << 1;
+
 struct Texture {
 	VkImage image = VK_NULL_HANDLE;
 	VkImageView imageView = VK_NULL_HANDLE;
 	VmaAllocation allocation = nullptr;
+	VkSampler sampler = VK_NULL_HANDLE;
+	int32_t arrayIndex = -1; //index into bindless buffer
+	uint32_t typeBits = 0;
+	uint32_t mipLevels = 0;
+	VkExtent3D imageExtent{};
+	VkImageSubresourceLayers imageSubresource{};
 };
 
 struct Mesh {
@@ -65,24 +74,21 @@ struct Mesh {
 	VmaAllocation vertexBufferAllocation = nullptr;
 	VkBuffer meshletBuffer = VK_NULL_HANDLE;
 	VmaAllocation meshletBufferAllocation = nullptr;
-	std::vector<Texture> diffuseTextures;
-	std::vector<Texture> specularTextures;
+	std::vector<Texture> textures;
 	VkBuffer modelMatrixBuffers[FRAME_QUEUE_LENGTH];
 	VmaAllocation modelMatrixBufferAllocations[FRAME_QUEUE_LENGTH];
 	VmaAllocationInfo modelMatrixBufferAllocationInfos[FRAME_QUEUE_LENGTH];
 	std::vector<glm::mat4> models;
 	std::vector<uint32_t> entities; //corresponds to the exact same entry in models and should be same length
 	VkDescriptorSet descriptorSet[FRAME_QUEUE_LENGTH]; //should be set number 1, representing models, vertexBuffer, and meshletBuffer
-	void destroy(VkDevice device, VmaAllocator allocator) {
+	void destroy(VkDevice device, VmaAllocator allocator, TextureIndexPool& indexPool) {
 		vmaDestroyBuffer(allocator, vertexBuffer, vertexBufferAllocation);
 		vmaDestroyBuffer(allocator, meshletBuffer, meshletBufferAllocation);
-		for (Texture& diffuse : diffuseTextures) {
-			vkDestroyImageView(device, diffuse.imageView, nullptr);
-			vmaDestroyImage(allocator, diffuse.image, nullptr);
-		}
-		for (Texture& specular : specularTextures) {
-			vkDestroyImageView(device, specular.imageView, nullptr);
-			vmaDestroyImage(allocator, specular.image, nullptr);
+		for (Texture& texture : textures) {
+			indexPool.freeTextureIndex(texture.arrayIndex);
+			vkDestroyImageView(device, texture.imageView, nullptr);
+			vkDestroySampler(device, texture.sampler, nullptr);
+			vmaDestroyImage(allocator, texture.image, texture.allocation);
 		}
 		for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
 			vmaDestroyBuffer(allocator, modelMatrixBuffers[i], modelMatrixBufferAllocations[i]);
@@ -97,6 +103,28 @@ struct Mesh {
 		return cond;
 	}
 };
+
+/*
+
+struct DebugMemoryData {
+	int32_t numAllocs = 0;
+	std::unordered_map< VkDeviceMemory, VkDeviceSize> allocs;
+};
+
+inline void debugAllocCallback(VmaAllocator allocator, uint32_t memoryType, VkDeviceMemory memory, VkDeviceSize size, void* pUserData) {
+	DebugMemoryData* debugMemoryData = reinterpret_cast<DebugMemoryData*>(pUserData);
+	debugMemoryData->allocs.emplace(memory, size);
+	debugMemoryData->numAllocs++;
+}
+
+inline void debugFreeCallback(VmaAllocator allocator, uint32_t memoryType, VkDeviceMemory memory, VkDeviceSize size, void* pUserData) {
+	DebugMemoryData* debugMemoryData = reinterpret_cast<DebugMemoryData*>(pUserData);
+	auto it = debugMemoryData->allocs.find(memory);
+	debugMemoryData->allocs.erase(it);
+	debugMemoryData->numAllocs--;
+}
+
+*/
 
 class VulkanRenderer {
 public:
@@ -126,15 +154,21 @@ public:
 			};
 			uniformMatrices[i].projection[1][1] *= -1;
 			frameInMeasurement[i] = false;
+			textureUpdates[i] = std::vector<Texture>();
 		}
 	}
 
 	void startUp(GLFWwindow* window);
 	void render(GLFWwindow* window, Camera& camera, UIState& uiState, EntityManager& entityManager);
 	void wait() { if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device); }
-	void loadMesh(std::string path);
+	void loadMesh(std::string path, bool flip);
 	void shutDown(); //control destruction order explicitly
 private:
+	/*
+	VmaDeviceMemoryCallbacks debugCallbacks{};
+	DebugMemoryData debugMemoryData{};
+	*/
+
 	JobManager& jobManager;
 	IOThread& ioThread;
 	vkb::Instance instance;
@@ -217,6 +251,8 @@ private:
 	VkDescriptorSet materialsDescriptorSets[FRAME_QUEUE_LENGTH];
 	void initStaticDescriptorSets();
 
+	VkSampler defaultSampler = VK_NULL_HANDLE;
+
 	bool uploadedMeshes = false;
 	bool uploadedDynamicBuffers = false;
 	VkSemaphore transferSemaphore = VK_NULL_HANDLE;
@@ -224,14 +260,17 @@ private:
 	JobCounter dynamicBufferUploadCounter;
 	std::vector<VkBufferMemoryBarrier> dynamicBufferBarriers; //don't use these until dynamic buffer counter is finished
 	std::vector<Mesh*> pendingMeshes; //once mesh counter is complete add these to the meshes map and clear
-	std::unordered_set<uint32_t> freeTextureIndices; //indices that are unused in the bindless texture descriptor set
 	uint32_t numMeshesCreated = 0;
 	std::unordered_map<uint32_t, Mesh*> meshes; //maps meshIndex to Mesh
 	std::vector<std::pair<uint8_t, Mesh*>> deletionQueue;
+	TextureIndexPool textureIndexPool; //synchronized using mutex
+	std::vector<Texture> textureUpdates[FRAME_QUEUE_LENGTH];
+
+	void genMipMap(VkCommandBuffer commandBuffer, Texture& texture);
 
 	//---------------------------------------------
 
-	// vvv USED BY IO THREAD vvv
+	// vvv USED BY IO THREAD ONLY, UNSYNCHRONIZED vvv
 	CommandPool transferCommandPool;
 	struct StagingBufferInfo {
 		VkBuffer buffer = VK_NULL_HANDLE;
@@ -242,14 +281,19 @@ private:
 		VkImageSubresourceLayers imageSubresource{};
 		VkOffset3D imageOffset{};
 		VkExtent3D imageExtent{};
+		uint32_t mipLevels = 0;
 	};
 
 	VkFence stagingBufferFence = VK_NULL_HANDLE;
 	std::vector<StagingBufferInfo> stagingBufferInfos;
-	// ^^^ USED BY IO THREAD ^^^
+	// ^^^ USED BY IO THREAD ONLY, UNSYNCHRONIZED ^^^
 
 	//These functions below are meant to be used only in the IOThread:
-	
+
+	//Loads the image into memory, creates a VkImage and transitions into to VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+	//then prepares the image for transfer by calling stageImage.
+	bool loadImage(VkCommandBuffer commandBuffer, std::string path, Texture& texture, VkFormat format, bool flip);
+
 	//Creates a staging buffer and uploads to it and adds it to stagingBufferInfos,
 	//preparing the actual buffer for transfer.
 	void stageBuffer(const void* srcData, VkDeviceSize size, VkBuffer outBuffer, VmaAllocation outAllocation);
@@ -257,7 +301,7 @@ private:
 	//preparing the actual image for transfer. The image MUST be in the VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL layout
 	//so a pipeline image barrier call is needed before using this function.
 	void stageImage(const void* srcData, VkDeviceSize size, VkImage outImage, VmaAllocation outAllocation,
-		VkOffset3D imageOffset, VkExtent3D imageExtent, VkImageSubresourceLayers imageSubresource);
+		VkOffset3D imageOffset, VkExtent3D imageExtent, VkImageSubresourceLayers imageSubresource, uint32_t mipLevels);
 	//Transfers all the batched, staged data into their respective backing resources along with their memory barriers using the transfer queue.
 	//Memory barriers release transfer queue's ownership of the backing resources. Signals transferSemaphore and stagingBufferFence.
 	void uploadResources();

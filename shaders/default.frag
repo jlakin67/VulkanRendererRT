@@ -23,6 +23,7 @@ void main()
 	if (vertexInput.diffuseIndex >= 0) {
 		outColor = texture( textures[vertexInput.diffuseIndex], vertexInput.texCoord );
 	} else outColor = vertexInput.diffuseColor;
+	if (outColor.a < 0.1) discard;
 	FragColor = outColor;
 	
 	//FragColor = vec4(normalize(vertexInput.pos), 1.0f);

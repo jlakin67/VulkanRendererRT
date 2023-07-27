@@ -107,6 +107,13 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	allocatorInfo.instance = instance.instance;
 	allocatorInfo.physicalDevice = physicalDevice.physical_device;
 	allocatorInfo.device = device.device;
+
+	#ifndef NDEBUG
+	//debugCallbacks.pfnAllocate = debugAllocCallback;
+	//debugCallbacks.pfnFree = debugFreeCallback;
+	//debugCallbacks.pUserData = &debugMemoryData;
+	//allocatorInfo.pDeviceMemoryCallbacks = &debugCallbacks;
+	#endif
 	VK_CHECK(vmaCreateAllocator(&allocatorInfo, &allocator));
 
 	VkCommandPoolCreateInfo commandPoolCreateInfo{};
@@ -153,6 +160,8 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	VK_CHECK(vkCreateFence(device, &fenceCreateInfo, nullptr, &stagingBufferFence));
 
 	initStaticDescriptorSets();
+
+	textureIndexPool.init();
 
 	uploadTestCube();
 
@@ -288,14 +297,20 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 			static char fileName[1000] = "";
 			ImGui::InputText("Path to load mesh", fileName, IM_ARRAYSIZE(fileName));
 			uiState.editingText = ImGui::IsItemActive();
+			static bool flip = false;
+			ImGui::Checkbox("Flip texture", &flip);
 			if (ImGui::Button("Upload mesh") && !meshUploadCounter.isBusy()) {
-				loadMesh(fileName);
+				loadMesh(fileName, flip);
 			}
 		}
 		
 		ImGui::End();
 
 		ImGui::Render();
+	}
+	else {
+		uiState.editingText = false;
+		uiState.uiHovered = false;
 	}
 
 	vkWaitForFences(device, 1, &frameQueueFences[currentFrame], VK_TRUE, UINT64_MAX);
@@ -319,7 +334,7 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	for (auto it = deletionQueue.begin(); it != deletionQueue.end();) {
 		it->first++;
 		if (it->first == FRAME_QUEUE_LENGTH) {
-			it->second->destroy(device, allocator);
+			it->second->destroy(device, allocator, textureIndexPool);
 			delete it->second;
 			it = deletionQueue.erase(it);
 		}
@@ -356,9 +371,13 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	static std::vector<VkPipelineStageFlags> waitStages;
 	static std::vector<VkSemaphore> waitSemaphores;
 	static std::vector<VkBufferMemoryBarrier> bufferMemoryBarriers;
+	static std::vector<VkImageMemoryBarrier> imageMemoryBarriers;
+	static std::vector<Texture> genMipMaps;
 	waitStages.clear();
 	waitSemaphores.clear();
 	bufferMemoryBarriers.clear();
+	imageMemoryBarriers.clear();
+	genMipMaps.clear();
 	waitSemaphores.push_back(acquireSemaphores[currentFrame]);
 	waitStages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
@@ -382,6 +401,28 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 				bufferMemoryBarrier.buffer = mesh->meshletBuffer;
 				bufferMemoryBarriers.push_back(bufferMemoryBarrier);
 				mesh->models.push_back(glm::mat4{ 1.0f });
+				for (Texture& texture : mesh->textures) {
+					assert(texture.image != VK_NULL_HANDLE);
+					assert(texture.imageView != VK_NULL_HANDLE);
+					assert(texture.sampler != VK_NULL_HANDLE);
+					VkImageMemoryBarrier imageMemoryBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+					imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+					imageMemoryBarrier.srcQueueFamilyIndex = transferQueueIndex;
+					imageMemoryBarrier.dstQueueFamilyIndex = graphicsQueueIndex;
+					imageMemoryBarrier.image = texture.image;
+					imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+					imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+					imageMemoryBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+					imageMemoryBarrier.subresourceRange.baseMipLevel = 0;
+					imageMemoryBarrier.subresourceRange.levelCount = texture.mipLevels;
+					imageMemoryBarrier.subresourceRange.baseArrayLayer = 0;
+					imageMemoryBarrier.subresourceRange.layerCount = 1;
+					imageMemoryBarriers.push_back(imageMemoryBarrier);
+					genMipMaps.push_back(texture);
+					for (uint8_t i = 0; i < FRAME_QUEUE_LENGTH; i++) {
+						textureUpdates[i].push_back(texture);
+					}
+				}
 				for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
 					VkBuffer modelMatricesBuffer = VK_NULL_HANDLE;
 					VmaAllocation modelMatricesBufferAllocation = nullptr;
@@ -478,11 +519,57 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 		dynamicBufferBarriers.clear();
 		uploadedDynamicBuffers = false;
 	}
-	if (bufferMemoryBarriers.empty()) {
+
+	VkBufferMemoryBarrier* pBufMemoryBarriers = nullptr;
+	if (!bufferMemoryBarriers.empty()) pBufMemoryBarriers = bufferMemoryBarriers.data();
+	VkImageMemoryBarrier* pImageMemoryBarriers = nullptr;
+	if (!imageMemoryBarriers.empty()) pImageMemoryBarriers = imageMemoryBarriers.data();
+	if (pBufMemoryBarriers && pImageMemoryBarriers) {
+		vkCmdPipelineBarrier(commandBuffer, 
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+			0, nullptr,
+			static_cast<uint32_t>(bufferMemoryBarriers.size()), pBufMemoryBarriers,
+			static_cast<uint32_t>(imageMemoryBarriers.size()), pImageMemoryBarriers);
 	}
-	else {
-		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
-			0, 0, nullptr, static_cast<uint32_t>(bufferMemoryBarriers.size()), bufferMemoryBarriers.data(), 0, nullptr);
+	else if (pBufMemoryBarriers) {
+		vkCmdPipelineBarrier(commandBuffer,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT, 0,
+			0, nullptr,
+			static_cast<uint32_t>(bufferMemoryBarriers.size()), pBufMemoryBarriers,
+			0, nullptr);
+	}
+	else if (pImageMemoryBarriers) {
+		vkCmdPipelineBarrier(commandBuffer,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+			0, nullptr,
+			0, nullptr,
+			static_cast<uint32_t>(imageMemoryBarriers.size()), pImageMemoryBarriers);
+	}
+
+	for (Texture& texture : genMipMaps) {
+		genMipMap(commandBuffer, texture);
+	}
+
+	std::vector<Texture>& texturesToUpdate = textureUpdates[currentFrame];
+	static std::vector<VkWriteDescriptorSet> writeDescriptorSets;
+	for (Texture& texture : texturesToUpdate) {
+		VkWriteDescriptorSet writeDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+		writeDescriptorSet.dstSet = materialsDescriptorSets[currentFrame];
+		writeDescriptorSet.dstBinding = 0;
+		writeDescriptorSet.dstArrayElement = texture.arrayIndex;
+		writeDescriptorSet.descriptorCount = 1;
+		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		VkDescriptorImageInfo* descriptorImageInfo = new VkDescriptorImageInfo{ texture.sampler, texture.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+		writeDescriptorSet.pImageInfo = descriptorImageInfo;
+		writeDescriptorSets.push_back(writeDescriptorSet);
+	}
+	texturesToUpdate.clear();
+	if (!writeDescriptorSets.empty()) {
+		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writeDescriptorSets.size()), writeDescriptorSets.data(), 0, nullptr);
+		for (VkWriteDescriptorSet& writeDescriptorSet : writeDescriptorSets) {
+			if (writeDescriptorSet.pImageInfo) delete writeDescriptorSet.pImageInfo;
+		}
+		writeDescriptorSets.clear();
 	}
 		
 	submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
@@ -582,11 +669,37 @@ struct LoadMeshJobArgs {
 	std::string path;
 	Mesh* mesh = nullptr;
 	VulkanRenderer* renderer = nullptr;
+	bool flip = false;
+};
+
+//boost hash combine
+template<typename T>
+void hash_combine(size_t& seed, T const& v) {
+	std::hash<T> hasher;
+	seed ^= hasher(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+template<typename T, typename U>
+struct PairHash {
+	inline std::size_t operator()(const std::pair<T, U>& v) const {
+		std::size_t seed = 0;
+		hash_combine(seed, v.first);
+		hash_combine(seed, v.second);
+		return seed;
+	}
+};
+
+template<typename T, typename U>
+struct PairPred {
+	inline bool operator()(const std::pair<T, U>& lhs, const std::pair<T, U>& rhs) const {
+		return (lhs.first == rhs.first) && (lhs.second == rhs.second);
+	}
 };
 
 void loadMeshJob(void* jobArgs) {
 	assert(jobArgs);
 	LoadMeshJobArgs* args = reinterpret_cast<LoadMeshJobArgs*>(jobArgs);
+	bool flip = args->flip;
 	Mesh* mesh = args->mesh;
 	assert(mesh);
 	VulkanRenderer* renderer = args->renderer;
@@ -625,7 +738,9 @@ void loadMeshJob(void* jobArgs) {
 	std::vector<std::vector<Vertex>> meshVertices;
 	std::vector<std::vector<uint32_t>> meshIndices;
 	std::vector<Meshlet> meshlets;
-	std::unordered_set<std::string> texNames;
+	std::unordered_map<std::pair<std::string, int>, Texture, //texture name & desiredChannels is key
+		PairHash<std::string, int>,
+		PairPred<std::string, int>> textures;
 
 	uint32_t numIndices = 0;
 	size_t maxMeshlets = static_cast<size_t>(renderer->maxPossibleMeshlets);
@@ -639,6 +754,21 @@ void loadMeshJob(void* jobArgs) {
 		hasMaterials = true;
 		currentMaterial = materials.at(shapes[0].mesh.material_ids[0]);
 		meshMaterials.push_back(currentMaterial);
+		Texture texture;
+		if (!currentMaterial.diffuse_texname.empty()) {
+			texture.typeBits |= TEXTURE_DIFFUSE_BIT;
+			textures.emplace(std::make_pair(currentMaterial.diffuse_texname, 4), texture);
+		}
+		if (!currentMaterial.specular_texname.empty()) {
+			auto it = textures.find(std::make_pair(currentMaterial.specular_texname, 4));
+			if (it == textures.end()) {
+				texture.typeBits |= TEXTURE_SPECULAR_BIT;
+				textures.emplace(std::make_pair(currentMaterial.specular_texname, 4), texture);
+			}
+			else {
+				it->second.typeBits |= TEXTURE_SPECULAR_BIT; //texture can be used as both diffuse and specular
+			}
+		}
 	}
 	for (const tinyobj::shape_t& shape : shapes) {
 		const tinyobj::mesh_t& mesh = shape.mesh;
@@ -663,6 +793,27 @@ void loadMeshJob(void* jobArgs) {
 					unindexedMeshVertices.push_back(std::vector<Vertex>());
 					currentMaterial = material;
 					meshMaterials.push_back(currentMaterial);
+					Texture texture;
+					if (!currentMaterial.diffuse_texname.empty()) {
+						auto it = textures.find(std::make_pair(currentMaterial.diffuse_texname, 4));
+						if (it == textures.end()) {
+							texture.typeBits |= TEXTURE_DIFFUSE_BIT;
+							textures.emplace(std::make_pair(currentMaterial.diffuse_texname, 4), texture);
+						}
+						else {
+							it->second.typeBits |= TEXTURE_DIFFUSE_BIT;
+						}
+					}
+					if (!currentMaterial.specular_texname.empty()) {
+						auto it = textures.find(std::make_pair(currentMaterial.specular_texname, 4));
+						if (it == textures.end()) {
+							texture.typeBits |= TEXTURE_SPECULAR_BIT;
+							textures.emplace(std::make_pair(currentMaterial.specular_texname, 4), texture);
+						}
+						else {
+							it->second.typeBits |= TEXTURE_SPECULAR_BIT;
+						}
+					}
 				}
 			}
 			for (int v = 0; v < 3; v++) {
@@ -708,15 +859,41 @@ void loadMeshJob(void* jobArgs) {
 
 	if (hasMaterials) {
 		assert(unindexedMeshVertices.size() == meshMaterials.size());
-		std::vector<VkCommandBuffer>& commandBuffers = renderer->transferCommandPool.getCommandBuffers(2);
-		VkCommandBuffer commandBuffer = commandBuffers.at(1);
-		for (tinyobj::material_t& material : meshMaterials) {
-			if (!material.diffuse_texname.empty()) {
-				VkImage diffuseTexture = VK_NULL_HANDLE;
-				VkImageView diffuseTextureView = VK_NULL_HANDLE;
+		size_t numCommandBuffers = textures.size();
+		std::vector<VkCommandBuffer>& commandBuffers = renderer->transferCommandPool.getCommandBuffers(numCommandBuffers+1);
+		uint32_t commandBufferIndex = 1;
+		for (auto& pair : textures) {
+			VkCommandBuffer commandBuffer = commandBuffers.at(commandBufferIndex);
+			Texture& texture = pair.second;
+			std::string newPath = pair.first.first;
+			std::replace(newPath.begin(), newPath.end(), '\\', '/');
+			std::string texPath = directory + "/" + newPath;
+			assert(texture.image == VK_NULL_HANDLE);
+			assert(texture.imageView == VK_NULL_HANDLE);
+			assert(texture.sampler == VK_NULL_HANDLE);
+			bool loadedTexture = false;
+			if (((texture.typeBits & TEXTURE_DIFFUSE_BIT) != 0) || ((texture.typeBits & TEXTURE_SPECULAR_BIT) != 0)) {
+				loadedTexture = renderer->loadImage(commandBuffer, texPath, texture, VK_FORMAT_R8G8B8A8_SRGB, flip);
+			} else {
+				assert(texture.typeBits != 0);
+			}
+			commandBufferIndex++;
+			if (loadedTexture) {
+				assert(texture.typeBits != 0);
+				assert(texture.image != VK_NULL_HANDLE);
+				assert(texture.imageView != VK_NULL_HANDLE);
+				assert(texture.sampler != VK_NULL_HANDLE);
+				texture.arrayIndex = renderer->textureIndexPool.getTextureIndex();
+				mesh->textures.push_back(texture);
+			}
+			else {
+				assert(texture.image == VK_NULL_HANDLE);
+				assert(texture.imageView == VK_NULL_HANDLE);
+				assert(texture.sampler == VK_NULL_HANDLE);
 			}
 		}
 	}
+	assert(mesh->textures.size() == textures.size());
 
 	uint32_t vertexBufferOffset = 0;
 	for (int m = 0; m < unindexedMeshVertices.size(); m++) {
@@ -738,19 +915,39 @@ void loadMeshJob(void* jobArgs) {
 			static_cast<uint32_t>(vertexCount), sizeof(Vertex), MESHLET_MAX_VERTICES, MESHLET_MAX_INDICES / 3, 0.0f);
 		tinyobj::material_t material;
 		if (hasMaterials) material = meshMaterials.at(m);
+		const meshopt_Meshlet& last = meshOptMeshlets[numMeshletsGenerated - 1];
+		uint32_t numMeshletVertices = last.vertex_offset + last.vertex_count;
+		uint32_t numMeshletTriangles = last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3);
 		for (uint32_t i = 0; i < numMeshletsGenerated && i < maxMeshlets; i++) {
 			meshopt_Meshlet& meshOptMeshlet = meshOptMeshlets[i];
 			Meshlet meshlet;
 			if (hasMaterials) {
 				meshlet.diffuseColor = glm::vec4{ material.diffuse[0], material.diffuse[1], material.diffuse[2], 1.0 };
 				meshlet.specularColor = glm::vec4{ material.specular[0], material.specular[1], material.specular[2], 1.0 };
+				if (!material.diffuse_texname.empty()) {
+					auto it = textures.find(std::make_pair(material.diffuse_texname, 4));
+					assert(it != textures.end());
+					assert((it->second.typeBits & TEXTURE_DIFFUSE_BIT) != 0);
+					meshlet.diffuseIndex = it->second.arrayIndex;
+				}
+				if (!material.specular_texname.empty()) {
+					auto it = textures.find(std::make_pair(material.specular_texname, 4));
+					assert(it != textures.end());
+					assert((it->second.typeBits & TEXTURE_SPECULAR_BIT) != 0);
+					meshlet.specularIndex = it->second.arrayIndex;
+				}
 			}
+			assert(meshOptMeshlet.vertex_count <= MESHLET_MAX_VERTICES);
+			assert(meshOptMeshlet.triangle_count <= MESHLET_MAX_INDICES / 3);
 			meshlet.vertexCount = meshOptMeshlet.vertex_count;
 			meshlet.indexCount = meshOptMeshlet.triangle_count * 3;
 			for (uint32_t j = 0; j < meshlet.vertexCount; j++) {
-				meshlet.vertices[j] = meshletVertices[j + meshOptMeshlet.vertex_offset] + vertexBufferOffset;
+				uint32_t vertexIndex = j + meshOptMeshlet.vertex_offset;
+				assert(vertexIndex < numMeshletVertices);
+				meshlet.vertices[j] = meshletVertices[vertexIndex] + vertexBufferOffset;
 			}
 			for (uint32_t j = 0; j < meshOptMeshlet.triangle_count; j++) {
+				assert((meshOptMeshlet.triangle_offset + 3 * j + 2) < numMeshletTriangles);
 				meshlet.indices[3 * j] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j];
 				meshlet.indices[3 * j + 1] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j + 1];
 				meshlet.indices[3 * j + 2] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j + 2];
@@ -758,7 +955,7 @@ void loadMeshJob(void* jobArgs) {
 			meshlets.push_back(meshlet);
 		}
 		mesh->numMeshlets += numMeshletsGenerated;
-		vertexBufferOffset += vertexCount;
+		vertexBufferOffset += static_cast<uint32_t>(vertexCount);
 	}
 	
 	delete[] meshOptMeshlets;
@@ -798,7 +995,7 @@ void loadMeshJob(void* jobArgs) {
 	std::cout << "Finished loading mesh" << std::endl;
 }
 
-void VulkanRenderer::loadMesh(std::string path) {
+void VulkanRenderer::loadMesh(std::string path, bool flip) {
 	std::string newPath(path);
 	std::replace(newPath.begin(), newPath.end(), '\\', '/');
 
@@ -806,7 +1003,7 @@ void VulkanRenderer::loadMesh(std::string path) {
 	pendingMeshes.push_back(mesh);
 
 	Job job;
-	LoadMeshJobArgs* jobArgs = new LoadMeshJobArgs{ newPath, mesh, this};
+	LoadMeshJobArgs* jobArgs = new LoadMeshJobArgs{ newPath, mesh, this, flip};
 	job.func = loadMeshJob;
 	job.jobArgs = jobArgs;
 	job.counter = &meshUploadCounter;
@@ -835,17 +1032,18 @@ void VulkanRenderer::shutDown() {
 	destroyImgui();
 	vkDestroyFence(device, stagingBufferFence, nullptr);
 	for (Mesh* mesh : pendingMeshes) { //should be empty
-		mesh->destroy(device, allocator);
+		mesh->destroy(device, allocator, textureIndexPool);
 		delete mesh;
 	}
 	for (auto& pair : deletionQueue) { //may or may not be empty
-		pair.second->destroy(device, allocator);
+		pair.second->destroy(device, allocator, textureIndexPool);
 		delete pair.second;
 	}
 	for (auto& pair : meshes) {
-		pair.second->destroy(device, allocator);
+		pair.second->destroy(device, allocator, textureIndexPool);
 		delete pair.second;
 	}
+	assert(stagingBufferInfos.empty());
 	vkDestroySemaphore(device, transferSemaphore, nullptr);
 	for (int i = 0; i < FRAME_QUEUE_LENGTH; i++) {
 		vmaDestroyBuffer(allocator, transformsBuffers[i], transformsBufferAllocations[i]);
@@ -866,6 +1064,7 @@ void VulkanRenderer::shutDown() {
 	vkDestroyQueryPool(device, queryPool, nullptr);
 	destroySwapchain();
 	vmaDestroyAllocator(allocator);
+	//assert(debugMemoryData.numAllocs == 0);
 	vkb::destroy_device(device);
 	vkDestroySurfaceKHR(instance, surface, nullptr);
 	vkb::destroy_instance(instance);
@@ -1301,8 +1500,176 @@ void VulkanRenderer::initStaticDescriptorSets() {
 		descriptorWrite.pBufferInfo = &descriptorBufInfo;
 		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 	}
-	for (uint32_t i = 0; i < MAX_TEXTURES; i++) {
-		freeTextureIndices.insert(i);
+}
+
+void VulkanRenderer::genMipMap(VkCommandBuffer commandBuffer, Texture& texture) {
+	int mipWidth = texture.imageExtent.width;
+	int mipHeight = texture.imageExtent.height;
+	for (uint32_t i = 1; i < texture.mipLevels; i++) {
+		
+		VkImageMemoryBarrier imageMemoryBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+		imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		imageMemoryBarrier.subresourceRange.aspectMask = texture.imageSubresource.aspectMask;
+		imageMemoryBarrier.subresourceRange.baseMipLevel = i - 1;
+		imageMemoryBarrier.subresourceRange.levelCount = 1;
+		imageMemoryBarrier.subresourceRange.baseArrayLayer = texture.imageSubresource.baseArrayLayer;
+		imageMemoryBarrier.subresourceRange.layerCount = texture.imageSubresource.layerCount;
+		imageMemoryBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imageMemoryBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		imageMemoryBarrier.image = texture.image;
+		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+			0, nullptr,
+			0, nullptr,
+			1, &imageMemoryBarrier);
+		
+		VkImageBlit blit{};
+		blit.srcOffsets[0] = { 0, 0, 0 };
+		blit.srcOffsets[1] = { mipWidth, mipHeight, 1 };
+		blit.srcSubresource.aspectMask = texture.imageSubresource.aspectMask;
+		blit.srcSubresource.baseArrayLayer = texture.imageSubresource.baseArrayLayer;
+		blit.srcSubresource.layerCount = texture.imageSubresource.layerCount;
+		blit.srcSubresource.mipLevel = i - 1;
+		blit.dstOffsets[0] = { 0, 0, 0 };
+		blit.dstOffsets[1] = { mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1 };
+		blit.dstSubresource.aspectMask = texture.imageSubresource.aspectMask;
+		blit.dstSubresource.baseArrayLayer = texture.imageSubresource.baseArrayLayer;
+		blit.dstSubresource.layerCount = texture.imageSubresource.layerCount;
+		blit.dstSubresource.mipLevel = i;
+		vkCmdBlitImage(commandBuffer, texture.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+		if (mipWidth > 1) mipWidth /= 2;
+		if (mipHeight > 1) mipHeight /= 2;
+	}
+	VkImageMemoryBarrier finalImageMemoryBarriers[2];
+	finalImageMemoryBarriers[0] = VkImageMemoryBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+	finalImageMemoryBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	finalImageMemoryBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	finalImageMemoryBarriers[0].subresourceRange.aspectMask = texture.imageSubresource.aspectMask;
+	finalImageMemoryBarriers[0].subresourceRange.baseMipLevel = texture.mipLevels - 1;
+	finalImageMemoryBarriers[0].subresourceRange.levelCount = 1;
+	finalImageMemoryBarriers[0].subresourceRange.baseArrayLayer = texture.imageSubresource.baseArrayLayer;
+	finalImageMemoryBarriers[0].subresourceRange.layerCount = texture.imageSubresource.layerCount;
+	finalImageMemoryBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	finalImageMemoryBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	finalImageMemoryBarriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	finalImageMemoryBarriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	finalImageMemoryBarriers[0].image = texture.image;
+	finalImageMemoryBarriers[1] = VkImageMemoryBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+	finalImageMemoryBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	finalImageMemoryBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	finalImageMemoryBarriers[1].subresourceRange.aspectMask = texture.imageSubresource.aspectMask;
+	finalImageMemoryBarriers[1].subresourceRange.baseMipLevel = 0;
+	finalImageMemoryBarriers[1].subresourceRange.levelCount = texture.mipLevels - 1;
+	finalImageMemoryBarriers[1].subresourceRange.baseArrayLayer = texture.imageSubresource.baseArrayLayer;
+	finalImageMemoryBarriers[1].subresourceRange.layerCount = texture.imageSubresource.layerCount;
+	finalImageMemoryBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	finalImageMemoryBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	finalImageMemoryBarriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	finalImageMemoryBarriers[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	finalImageMemoryBarriers[1].image = texture.image;
+	vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+		0, nullptr,
+		0, nullptr,
+		2, finalImageMemoryBarriers);
+}
+
+bool VulkanRenderer::loadImage(VkCommandBuffer commandBuffer, std::string path, Texture& texture, VkFormat format, bool flip) {
+	if (flip) stbi_set_flip_vertically_on_load(true);
+	int width = 0, height = 0, numChannels = 0;
+	int channelsDesired;
+	if (format == VK_FORMAT_R8_SRGB) {
+		channelsDesired = 1;
+	}
+	else if (format == VK_FORMAT_R8G8B8A8_SRGB) {
+		channelsDesired = 4;
+	}
+	else {
+		channelsDesired = 4;
+	}
+	unsigned char* data = stbi_load(path.c_str(), &width, &height, &numChannels, channelsDesired);
+	if (data) {
+		VkImageCreateInfo imageInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.format = format;
+		VkExtent3D extent;
+		extent.width = width;
+		extent.height = height;
+		extent.depth = 1;
+		imageInfo.extent = extent;
+		texture.imageExtent = extent;
+		uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
+		VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+		samplerInfo.magFilter = VK_FILTER_LINEAR;
+		samplerInfo.minFilter = VK_FILTER_LINEAR;
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+		samplerInfo.anisotropyEnable = VK_TRUE;
+		samplerInfo.maxAnisotropy = physicalDevice.properties.limits.maxSamplerAnisotropy;
+		samplerInfo.unnormalizedCoordinates = VK_FALSE;
+		samplerInfo.compareEnable = VK_FALSE;
+		samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		samplerInfo.maxLod = static_cast<float>(mipLevels);
+		VK_CHECK(vkCreateSampler(device, &samplerInfo, nullptr, &texture.sampler));
+		texture.mipLevels = mipLevels;
+		imageInfo.mipLevels = mipLevels;
+		imageInfo.arrayLayers = 1;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+		VK_CHECK(vmaCreateImage(allocator, &imageInfo, &allocInfo, &texture.image, &texture.allocation, nullptr));
+		VkImageMemoryBarrier imageBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+		imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		imageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imageBarrier.image = texture.image;
+		imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		imageBarrier.subresourceRange.baseArrayLayer = 0;
+		imageBarrier.subresourceRange.layerCount = 1;
+		imageBarrier.subresourceRange.baseMipLevel = 0;
+		imageBarrier.subresourceRange.levelCount = mipLevels;
+		VkImageViewCreateInfo imageViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		imageViewInfo.image = texture.image;
+		imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imageViewInfo.format = format;
+		imageViewInfo.subresourceRange = imageBarrier.subresourceRange;
+		VK_CHECK(vkCreateImageView(device, &imageViewInfo, nullptr, &texture.imageView));
+		VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+			0, nullptr,
+			0, nullptr,
+			1, &imageBarrier);
+		VK_CHECK(vkEndCommandBuffer(commandBuffer));
+		VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+		VK_CHECK(vkQueueSubmit(transferQueue, 1, &submitInfo, VK_NULL_HANDLE));
+		VkDeviceSize imageSize = width * height * channelsDesired;
+		VkOffset3D offset{};
+		VkImageSubresourceLayers imageSubresource{};
+		imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		imageSubresource.baseArrayLayer = 0;
+		imageSubresource.layerCount = 1;
+		imageSubresource.mipLevel = 0;
+		texture.imageSubresource = imageSubresource;
+		stageImage(data, imageSize, texture.image, texture.allocation, offset, extent, imageSubresource, mipLevels);
+		return true;
+	}
+	else {
+		std::cout << "Unable to load texture at: " << path << std::endl;
+		return false;
 	}
 }
 
@@ -1328,7 +1695,7 @@ void VulkanRenderer::stageBuffer(const void* srcData, VkDeviceSize size, VkBuffe
 }
 
 void VulkanRenderer::stageImage(const void* srcData, VkDeviceSize size, VkImage outImage, VmaAllocation outAllocation,
-	VkOffset3D imageOffset, VkExtent3D imageExtent, VkImageSubresourceLayers imageSubresource) {
+	VkOffset3D imageOffset, VkExtent3D imageExtent, VkImageSubresourceLayers imageSubresource, uint32_t mipLevels) {
 	VkBufferCreateInfo bufferCreateInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	bufferCreateInfo.size = size;
 	bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -1349,6 +1716,7 @@ void VulkanRenderer::stageImage(const void* srcData, VkDeviceSize size, VkImage 
 	info.imageOffset = imageOffset;
 	info.imageExtent = imageExtent;
 	info.imageSubresource = imageSubresource;
+	info.mipLevels = mipLevels;
 	stagingBufferInfos.push_back(info);
 }
 
@@ -1392,10 +1760,10 @@ void VulkanRenderer::uploadResources() {
 			imageMemoryBarrier.dstQueueFamilyIndex = graphicsQueueIndex;
 			imageMemoryBarrier.image = info.backingImage;
 			imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-			imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			imageMemoryBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			imageMemoryBarrier.subresourceRange.aspectMask = info.imageSubresource.aspectMask;
 			imageMemoryBarrier.subresourceRange.baseMipLevel = info.imageSubresource.mipLevel;
-			imageMemoryBarrier.subresourceRange.levelCount = 1;
+			imageMemoryBarrier.subresourceRange.levelCount = info.mipLevels;
 			imageMemoryBarrier.subresourceRange.baseArrayLayer = info.imageSubresource.baseArrayLayer;
 			imageMemoryBarrier.subresourceRange.layerCount = info.imageSubresource.layerCount;
 			imageMemoryBarriers.push_back(imageMemoryBarrier);
