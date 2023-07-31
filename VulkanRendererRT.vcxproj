@@ -194,10 +194,13 @@
     <ClInclude Include="vulkan_renderer.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="shaders\aabb_bounds.glsl" />
     <None Include="shaders\default.frag" />
     <None Include="shaders\default.mesh" />
+    <None Include="shaders\default.task" />
     <None Include="shaders\test.mesh" />
     <None Include="shaders\test.frag" />
+    <None Include="shaders\uniforms.glsl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

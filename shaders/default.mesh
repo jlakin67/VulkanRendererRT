@@ -6,49 +6,46 @@
 //one workgroup per meshlet, per instance
 //each thread operates on one vertex and outputs one primitive (triangle) in the meshlet
 
-const uint MAX_MESHLET_VERTICES = 32;
-const uint MAX_MESHLET_PRIMITIVES = 32;
-const uint MAX_MESHLET_INDICES = MAX_MESHLET_PRIMITIVES * 3;
+#include "uniforms.glsl"
+#include "aabb_bounds.glsl"
 
 layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
-layout(triangles, max_vertices = MAX_MESHLET_VERTICES, max_primitives = MAX_MESHLET_PRIMITIVES) out;
+layout(triangles, max_vertices = MESHLET_MAX_VERTICES, max_primitives = MESHLET_MAX_PRIMITIVES) out;
+
+layout( push_constant ) uniform Constants
+{
+	bool useCulling;
+} pushConstants;
 
 layout (std140, set = 0, binding = 0) uniform Transforms { 
   mat4 view;
   mat4 projection;
 } transforms;
 
+layout (std430, set = 0, binding = 1) readonly buffer Frustum { 
+  float aabb[6];
+} frustum;
+
 layout (std140, set = 2, binding = 0) readonly buffer Instances { 
   mat4 models[];
 } instances;
-
-struct Vertex {
-  vec4 position;
-  vec4 normal;
-  vec2 texCoord;
-  vec2 pad;
-};
 
 layout (std430, set = 2, binding = 1) readonly buffer VertexBuffer {
   Vertex vertices[];
 } vertexBuffer;
 
-struct Meshlet
-{
-  uint vertexCount;
-  uint indexCount;
-  int diffuseIndex;
-  int specularIndex;
-  vec4 diffuseColor;
-  vec4 specularColor;
-  uint vertices[MAX_MESHLET_VERTICES];
-  uint indices[MAX_MESHLET_INDICES];
-};
-
 layout (std430, set = 2, binding = 2) readonly buffer MeshletBuffer
 {
   Meshlet meshlets[];
 } meshletBuffer;
+
+layout (std430, set = 2, binding = 3) readonly buffer MeshletInfoBuffer
+{
+  MeshletInfo meshletInfos[];
+} meshletInfos;
+
+
+taskPayloadSharedEXT Payload payload;
 
 layout (location = 0) out PerVertexData
 {
@@ -62,11 +59,17 @@ layout (location = 0) out PerVertexData
 } v_out[];   // [max_vertices]
 
 void main() {
-	uint instanceID = gl_WorkGroupID.y; //the y axis used for instances
+	uint instanceID;
+	if (pushConstants.useCulling) instanceID = payload.modelIndex;
+	else instanceID = gl_WorkGroupID.y; //the y axis used for instances
 	mat4 model = instances.models[instanceID];
 	mat4 invTranspose = inverse(transpose(model));
-	uint meshletID = gl_WorkGroupID.x;
+	uint meshletID;
+	if (pushConstants.useCulling) {
+		meshletID = payload.baseID + payload.subIDs[gl_WorkGroupID.x];
+	} else meshletID = gl_WorkGroupID.x;
 	Meshlet meshlet = meshletBuffer.meshlets[meshletID];
+	MeshletInfo meshletInfo = meshletInfos.meshletInfos[meshletID];
 	uint vertexID = gl_LocalInvocationID.x;
 	uint primitiveID = gl_LocalInvocationID.x;
 	uint primitiveCount = meshlet.indexCount / 3;
@@ -81,6 +84,33 @@ void main() {
 		v_out[vertexID].specularIndex = meshlet.specularIndex;
 		v_out[vertexID].diffuseColor = meshlet.diffuseColor;
 		v_out[vertexID].specularColor = meshlet.specularColor;
+		/*
+		vec3 c = meshletInfo.boundingSphere.xyz;
+		float radius = meshletInfo.boundingSphere.w;
+		float sx = sqrt(dot(model[0].xyz, model[0].xyz));
+		float sy = sqrt(dot(model[1].xyz, model[1].xyz));
+		float sz = sqrt(dot(model[2].xyz, model[2].xyz));
+		mat3 scale;
+		scale[0] = vec3(sx, 0, 0);
+		scale[1] = vec3(0, sy, 0);
+		scale[2] = vec3(0, 0, sz);
+		c = scale*c;
+		c = c + model[3].xyz;
+		float s = sx;
+		s = max(s, sy);
+		s = max(s, sz);
+		float r = radius * s;
+		vec4 sphereCenter = vec4(c, 1.0f);
+		sphereCenter = transforms.view * sphereCenter;
+		vec4 boundingSphere = vec4(sphereCenter.xyz, r);
+		bool render = sphereAABBIntersect(boundingSphere, frustum.aabb);
+		*/
+		//vec4 aabb;
+		//getSphereBoundsMara(sphereCenter.xyz, r, 0.01, transforms.projection, aabb);
+		//bool render = intersect(aabb, vec4(-1.0f, -1.0f, 1.0f, 1.0f));
+		//if (render) v_out[vertexID].diffuseColor = vec4(1.0f, 0.0f, 0.0f, 1.0f);
+		//else v_out[vertexID].diffuseColor = vec4(0.0f, 1.0f, 0.0f, 1.0f);
+		v_out[vertexID].diffuseColor = meshlet.diffuseColor;
 		gl_MeshVerticesEXT[vertexID].gl_Position = transforms.projection * transforms.view * worldPos;
 	}
 	if (primitiveID < primitiveCount) {

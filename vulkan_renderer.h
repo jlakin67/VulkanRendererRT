@@ -8,6 +8,7 @@
 #include <imgui.h>
 #include "scene.h"
 #include <stb_image.h>
+#include <iostream>
 
 enum RenderPassNames {
 	RenderPass_Default, //just one subpass with swapchain color attachment and depth-stencil attachment only
@@ -45,6 +46,10 @@ struct Meshlet
 	uint32_t indices[MESHLET_MAX_INDICES]; // 32 triangles
 };
 
+struct MeshletInfo {
+	glm::vec4 boundingSphere{ 0.0f, 0.0f, 0.0f, 0.5f }; //center, radius
+};
+
 constexpr const uint32_t TEXTURE_DIFFUSE_BIT = 1 << 0;
 constexpr const uint32_t TEXTURE_SPECULAR_BIT = 1 << 1;
 
@@ -74,6 +79,8 @@ struct Mesh {
 	VmaAllocation vertexBufferAllocation = nullptr;
 	VkBuffer meshletBuffer = VK_NULL_HANDLE;
 	VmaAllocation meshletBufferAllocation = nullptr;
+	VkBuffer meshletInfoBuffer = VK_NULL_HANDLE;
+	VmaAllocation meshletInfoBufferAllocation = nullptr;
 	std::vector<Texture> textures;
 	VkBuffer modelMatrixBuffers[FRAME_QUEUE_LENGTH];
 	VmaAllocation modelMatrixBufferAllocations[FRAME_QUEUE_LENGTH];
@@ -84,6 +91,7 @@ struct Mesh {
 	void destroy(VkDevice device, VmaAllocator allocator, TextureIndexPool& indexPool) {
 		vmaDestroyBuffer(allocator, vertexBuffer, vertexBufferAllocation);
 		vmaDestroyBuffer(allocator, meshletBuffer, meshletBufferAllocation);
+		vmaDestroyBuffer(allocator, meshletInfoBuffer, meshletInfoBufferAllocation);
 		for (Texture& texture : textures) {
 			indexPool.freeTextureIndex(texture.arrayIndex);
 			vkDestroyImageView(device, texture.imageView, nullptr);
@@ -126,6 +134,30 @@ inline void debugFreeCallback(VmaAllocator allocator, uint32_t memoryType, VkDev
 
 */
 
+//aabb = [minx, maxx, miny, maxy, minz, maxz]
+inline float sqDistPointAABB(glm::vec3 p, float aabb[6]) {
+	float sqDist = 0.0f;
+	for (int i = 0; i < 3; i++) {
+		float v = p[i];
+		if (v < aabb[2 * i]) sqDist += (aabb[2 * i] - v) * (aabb[2 * i] - v);
+		if (v > aabb[2 * i + 1]) sqDist += (v - aabb[2 * i + 1]) * (v - aabb[2 * i + 1]);
+	}
+	return sqDist;
+}
+
+//aabb = [minx, maxx, miny, maxy, minz, maxz]
+inline bool sphereAABBIntersect(glm::vec4 sphere, float aabb[6]) {
+	float sqDist = sqDistPointAABB(sphere, aabb);
+	return sqDist <= sphere.w * sphere.w;
+}
+
+inline bool pointInSphere(glm::vec4 sphere, glm::vec3 p) {
+	glm::vec3 center{sphere.x, sphere.y, sphere.z};
+	glm::vec3 disp = center - p;
+	float distSq = glm::dot(disp, disp);
+	return (distSq <= sphere.w * sphere.w);
+}
+
 class VulkanRenderer {
 public:
 	VulkanRenderer(JobManager& jobManager, IOThread& ioThread) : jobManager{ jobManager }, ioThread{ ioThread } {
@@ -143,6 +175,9 @@ public:
 			transformsBuffers[i] = VK_NULL_HANDLE;
 			transformsBufferAllocations[i] = nullptr;
 			transformsBufferAllocationInfos[i] = VmaAllocationInfo{};
+			frustumAABBBuffers[i] = VK_NULL_HANDLE;
+			frustumAABBAllocations[i] = nullptr;
+			frustumAABBAllocationInfos[i] = VmaAllocationInfo{};
 			acquireSemaphores[i] = VK_NULL_HANDLE;
 			presentSemaphores[i] = VK_NULL_HANDLE;
 			frameQueueFences[i] = VK_NULL_HANDLE;
@@ -152,7 +187,12 @@ public:
 				glm::mat4{ 1.0f },
 				glm::perspective(CAMERA_FOV_Y, INIT_ASPECT_RATIO, Z_NEAR, Z_FAR)
 			};
-			uniformMatrices[i].projection[1][1] *= -1;
+			frustumAABB[i][0] = left;
+			frustumAABB[i][1] = right;
+			frustumAABB[i][2] = bottom;
+			frustumAABB[i][3] = top;
+			frustumAABB[i][4] = -Z_FAR;
+			frustumAABB[i][5] = -Z_NEAR;
 			frameInMeasurement[i] = false;
 			textureUpdates[i] = std::vector<Texture>();
 		}
@@ -187,7 +227,7 @@ private:
 
 	bool timestampBitsValid = false;
 	double timestampPeriod = 1.0;
-	VkQueryPool queryPool = VK_NULL_HANDLE;
+	VkQueryPool timeQueryPool = VK_NULL_HANDLE;
 	bool measureFrameTime = false;
 	bool frameInMeasurement[FRAME_QUEUE_LENGTH];
 	bool frameTimeAvailable = false;
@@ -244,9 +284,18 @@ private:
 	void destroyImgui();
 
 	UniformMatrices uniformMatrices[FRAME_QUEUE_LENGTH];
+	float currentAspectRatio = INIT_ASPECT_RATIO;
+	float top = Z_NEAR * std::tanf(glm::radians(CAMERA_FOV_Y));
+	float bottom = -top;
+	float right = top * currentAspectRatio;
+	float left = -right;
+	float frustumAABB[FRAME_QUEUE_LENGTH][6];
 	VkBuffer transformsBuffers[FRAME_QUEUE_LENGTH];
+	VkBuffer frustumAABBBuffers[FRAME_QUEUE_LENGTH];
 	VmaAllocation transformsBufferAllocations[FRAME_QUEUE_LENGTH];
+	VmaAllocation frustumAABBAllocations[FRAME_QUEUE_LENGTH];
 	VmaAllocationInfo transformsBufferAllocationInfos[FRAME_QUEUE_LENGTH];
+	VmaAllocationInfo frustumAABBAllocationInfos[FRAME_QUEUE_LENGTH];
 	VkDescriptorSet transformsDescriptorSets[FRAME_QUEUE_LENGTH];
 	VkDescriptorSet materialsDescriptorSets[FRAME_QUEUE_LENGTH];
 	void initStaticDescriptorSets();
@@ -334,4 +383,6 @@ private:
 
 	uint8_t currentFrame = 0;
 	uint64_t numFramesProcessed = 0;
+
+	VkBool32 useCulling = VK_TRUE;
 };

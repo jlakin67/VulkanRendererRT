@@ -25,6 +25,7 @@ void main()
 	} else outColor = vertexInput.diffuseColor;
 	if (outColor.a < 0.1) discard;
 	FragColor = outColor;
+	//FragColor = vertexInput.diffuseColor;
 	
 	//FragColor = vec4(normalize(vertexInput.pos), 1.0f);
 }

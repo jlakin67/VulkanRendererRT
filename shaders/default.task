@@ -1,0 +1,83 @@
+#version 460 core
+#extension GL_EXT_mesh_shader : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
+#include "uniforms.glsl"
+#include "aabb_bounds.glsl"
+
+layout( local_size_x = 32, local_size_y = 1, local_size_z = 1 ) in;
+
+layout( push_constant ) uniform Constants
+{
+	bool useCulling;
+	uint numMeshlets;
+	uint numInstances;
+} pushConstants;
+
+layout (std140, set = 0, binding = 0) uniform Transforms { 
+  mat4 view;
+  mat4 projection;
+} transforms;
+
+layout (std430, set = 0, binding = 1) readonly buffer Frustum { 
+  float aabb[6];
+} frustum;
+
+layout (std140, set = 2, binding = 0) readonly buffer Instances { 
+  mat4 models[];
+} instances;
+
+layout (std430, set = 2, binding = 2) readonly buffer MeshletBuffer
+{
+  Meshlet meshlets[];
+} meshletBuffer;
+
+layout (std430, set = 2, binding = 3) readonly buffer MeshletInfoBuffer
+{
+  MeshletInfo meshletInfos[];
+} meshletInfos;
+
+taskPayloadSharedEXT Payload payload;
+
+void main() {
+	if (pushConstants.useCulling) {
+		mat4 model = instances.models[gl_WorkGroupID.y];
+		bool render = gl_GlobalInvocationID.x < pushConstants.numMeshlets;
+		
+		if (render) {
+			Meshlet meshlet = meshletBuffer.meshlets[gl_GlobalInvocationID.x];
+			MeshletInfo meshletInfo = meshletInfos.meshletInfos[gl_GlobalInvocationID.x];
+			vec3 c = meshletInfo.boundingSphere.xyz;
+			float radius = meshletInfo.boundingSphere.w;
+			float sx = sqrt(dot(model[0].xyz, model[0].xyz));
+			float sy = sqrt(dot(model[1].xyz, model[1].xyz));
+			float sz = sqrt(dot(model[2].xyz, model[2].xyz));
+			mat3 scale;
+			scale[0] = vec3(sx, 0, 0);
+			scale[1] = vec3(0, sy, 0);
+			scale[2] = vec3(0, 0, sz);
+			c = scale*c;
+			c = c + model[3].xyz;
+			float s = sx;
+			s = max(s, sy);
+			s = max(s, sz);
+			float r = radius * s;
+			vec4 sphereCenter = vec4(c, 1.0f);
+			sphereCenter = transforms.view * sphereCenter;
+			vec4 boundingSphere = vec4(sphereCenter.xyz, r);
+			bool render = sphereAABBIntersect(boundingSphere, frustum.aabb);
+		}
+		
+		uvec4 vote = subgroupBallot(render);
+		uint tasks = subgroupBallotBitCount(vote);
+		uint idxOffset = subgroupBallotExclusiveBitCount(vote);
+		if (render) payload.subIDs[idxOffset] = gl_LocalInvocationID.x;
+		if (gl_LocalInvocationID.x == 0) {
+			payload.baseID = gl_WorkGroupID.x*32;
+			payload.modelIndex = gl_WorkGroupID.y;
+		}
+		EmitMeshTasksEXT(tasks, 1, 1);
+	} else {
+		EmitMeshTasksEXT(pushConstants.numMeshlets, pushConstants.numInstances, 1);
+	}
+}

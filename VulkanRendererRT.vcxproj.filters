@@ -151,5 +151,14 @@
     <None Include="shaders\default.frag">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="shaders\aabb_bounds.glsl">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\default.task">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\uniforms.glsl">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>
