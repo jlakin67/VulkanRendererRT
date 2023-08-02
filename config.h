@@ -21,7 +21,9 @@ constexpr uint32_t numValidationFeatures = static_cast<uint32_t>(std::size(valid
 
 constexpr const char* deviceExtensions[] = { VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
 											 VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME,
-											 VK_EXT_MESH_SHADER_EXTENSION_NAME };
+											 VK_EXT_MESH_SHADER_EXTENSION_NAME,
+											 VK_EXT_ROBUSTNESS_2_EXTENSION_NAME
+										   };
 constexpr uint32_t numDeviceExtensions = static_cast<uint32_t>(std::size(deviceExtensions));
 
 constexpr const uint32_t MAX_JOBS = 1000;

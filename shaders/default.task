@@ -32,11 +32,6 @@ layout (std430, set = 2, binding = 2) readonly buffer MeshletBuffer
   Meshlet meshlets[];
 } meshletBuffer;
 
-layout (std430, set = 2, binding = 3) readonly buffer MeshletInfoBuffer
-{
-  MeshletInfo meshletInfos[];
-} meshletInfos;
-
 taskPayloadSharedEXT Payload payload;
 
 void main() {
@@ -46,9 +41,8 @@ void main() {
 		
 		if (render) {
 			Meshlet meshlet = meshletBuffer.meshlets[gl_GlobalInvocationID.x];
-			MeshletInfo meshletInfo = meshletInfos.meshletInfos[gl_GlobalInvocationID.x];
-			vec3 c = meshletInfo.boundingSphere.xyz;
-			float radius = meshletInfo.boundingSphere.w;
+			vec3 c = meshlet.boundingSphere.xyz;
+			float radius = meshlet.boundingSphere.w;
 			float sx = sqrt(dot(model[0].xyz, model[0].xyz));
 			float sy = sqrt(dot(model[1].xyz, model[1].xyz));
 			float sz = sqrt(dot(model[2].xyz, model[2].xyz));

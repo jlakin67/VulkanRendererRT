@@ -63,15 +63,24 @@ void VulkanRenderer::startUp(GLFWwindow* window) {
 	VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT cacheControlFeatures{
 	VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT };
 	cacheControlFeatures.pipelineCreationCacheControl = VK_TRUE;
+	VkPhysicalDeviceRobustness2FeaturesEXT robustnessFeatures{
+	VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
+	robustnessFeatures.nullDescriptor = VK_TRUE;
 	physDeviceSelector.set_required_features(deviceFeatures);
 	physDeviceSelector.set_minimum_version(1, 2);
 	physDeviceSelector.set_required_features_12(deviceFeatures12);
 	physDeviceSelector.add_required_extension_features(extendedDynamicStateFeatures);
 	physDeviceSelector.add_required_extension_features(meshShaderFeatures);
 	physDeviceSelector.add_required_extension_features(cacheControlFeatures);
+	physDeviceSelector.add_required_extension_features(robustnessFeatures);
 	auto physDeviceSelectorRet = physDeviceSelector.select();
 	if (!physDeviceSelectorRet) {
 		std::cerr << "Unable to find suitable device. Error: " << physDeviceSelectorRet.error().message() << std::endl;
+		std::cerr << "The following extensions are required: ";
+		for (int i = 0; i < numDeviceExtensions; i++) {
+			std::cerr << deviceExtensions[i] << std::endl;
+		}
+		std::cerr << "Vulkan 1.2 is also required" << std::endl;
 		exit(EXIT_FAILURE);
 	}
 	physicalDevice = physDeviceSelectorRet.value();
@@ -304,8 +313,8 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 			}
 			static bool checkboxCulling = true;
 			ImGui::Checkbox("Use culling", &checkboxCulling);
-			if (checkboxCulling) useCulling = VK_TRUE;
-			else useCulling = VK_FALSE;
+			if (checkboxCulling) useFrustumCulling = VK_TRUE;
+			else useFrustumCulling = VK_FALSE;
 		}
 		
 		ImGui::End();
@@ -465,6 +474,10 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 				bufferMemoryBarriers.push_back(bufferMemoryBarrier);
 				bufferMemoryBarrier.buffer = mesh->meshletBuffer;
 				bufferMemoryBarriers.push_back(bufferMemoryBarrier);
+				if (mesh->materialsBuffer != VK_NULL_HANDLE) {
+					bufferMemoryBarrier.buffer = mesh->materialsBuffer;
+					bufferMemoryBarriers.push_back(bufferMemoryBarrier);
+				}
 				mesh->models.push_back(glm::mat4{ 1.0f });
 				for (Texture& texture : mesh->textures) {
 					assert(texture.image != VK_NULL_HANDLE);
@@ -548,7 +561,7 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 						VK_WHOLE_SIZE
 					};
 					descriptorWrite[2].pBufferInfo = &descriptorBufInfo[2];
-
+					uint32_t numDescriptorWrites = 4;
 					descriptorWrite[3] = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
 					descriptorWrite[3].dstSet = mesh->descriptorSet[i];
 					descriptorWrite[3].dstBinding = 3;
@@ -556,12 +569,12 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 					descriptorWrite[3].descriptorCount = 1;
 					descriptorWrite[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 					descriptorBufInfo[3] = {
-						mesh->meshletInfoBuffer,
+						mesh->materialsBuffer,
 						0,
 						VK_WHOLE_SIZE
 					};
 					descriptorWrite[3].pBufferInfo = &descriptorBufInfo[3];
-					vkUpdateDescriptorSets(device, 4, descriptorWrite, 0, nullptr);
+					vkUpdateDescriptorSets(device, numDescriptorWrites, descriptorWrite, 0, nullptr);
 					DynamicBufferUploadJobArgs jobArgs{
 						mesh->modelMatrixBuffers[i],
 						mesh->modelMatrixBufferAllocations[i],
@@ -604,14 +617,14 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	if (!imageMemoryBarriers.empty()) pImageMemoryBarriers = imageMemoryBarriers.data();
 	if (pBufMemoryBarriers && pImageMemoryBarriers) {
 		vkCmdPipelineBarrier(commandBuffer, 
-			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
 			0, nullptr,
 			static_cast<uint32_t>(bufferMemoryBarriers.size()), pBufMemoryBarriers,
 			static_cast<uint32_t>(imageMemoryBarriers.size()), pImageMemoryBarriers);
 	}
 	else if (pBufMemoryBarriers) {
 		vkCmdPipelineBarrier(commandBuffer,
-			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT, 0,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT, 0,
 			0, nullptr,
 			static_cast<uint32_t>(bufferMemoryBarriers.size()), pBufMemoryBarriers,
 			0, nullptr);
@@ -672,7 +685,7 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 	vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines[Graphics_Default]);
 	vkCmdPushConstants(commandBuffer, pipelineLayouts[Graphics_Default], VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT,
-		0, sizeof(useCulling), &useCulling);
+		0, sizeof(useFrustumCulling), &useFrustumCulling);
 	VkViewport viewport{ 0.0f, 0.0f, static_cast<float>(swapchain.extent.width) ,
 	static_cast<float>(swapchain.extent.height) , 0.0f, 1.0f };
 	vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -690,10 +703,10 @@ void VulkanRenderer::render(GLFWwindow* window, Camera& camera, UIState& uiState
 		uint32_t numMeshlets = mesh->numMeshlets;
 		uint32_t numModels = static_cast<uint32_t>(mesh->models.size());
 		vkCmdPushConstants(commandBuffer, pipelineLayouts[Graphics_Default], VK_SHADER_STAGE_TASK_BIT_EXT,
-			sizeof(useCulling), sizeof(uint32_t), &numMeshlets);
+			sizeof(useFrustumCulling), sizeof(uint32_t), &numMeshlets);
 		vkCmdPushConstants(commandBuffer, pipelineLayouts[Graphics_Default], VK_SHADER_STAGE_TASK_BIT_EXT,
-			sizeof(useCulling)+sizeof(uint32_t), sizeof(uint32_t), &numModels);
-		if (useCulling) {
+			sizeof(useFrustumCulling)+sizeof(uint32_t), sizeof(uint32_t), &numModels);
+		if (useFrustumCulling) {
 			float numWorkGroups = numMeshlets / 32.f;
 			vkCmdDrawMeshTasks(commandBuffer, static_cast<uint32_t>(std::ceil(numWorkGroups)), numModels, 1);
 		} else vkCmdDrawMeshTasks(commandBuffer, 1, 1, 1);
@@ -817,17 +830,15 @@ void loadMeshJob(void* jobArgs) {
 
 	const tinyobj::attrib_t& attrib = reader.GetAttrib();
 	const std::vector<tinyobj::shape_t>& shapes = reader.GetShapes();
-	const std::vector<tinyobj::material_t>& materials = reader.GetMaterials();
+	const std::vector<tinyobj::material_t>& tinyObjMaterials = reader.GetMaterials();
 
-	uint32_t meshIndex = 0;
-	std::vector<std::vector<Vertex>> unindexedMeshVertices;
-	std::vector<tinyobj::material_t> meshMaterials;
-	unindexedMeshVertices.push_back(std::vector<Vertex>());
-	std::vector<std::vector<uint32_t>> meshRemaps;
-	std::vector<std::vector<Vertex>> meshVertices;
-	std::vector<std::vector<uint32_t>> meshIndices;
+	std::vector<Vertex> unindexedVertices;
+	std::vector<uint32_t> remap;
+	std::vector<Vertex> vertices;
+	std::vector<uint32_t> indices;
 	std::vector<Meshlet> meshlets;
-	std::vector<MeshletInfo> meshletInfos;
+	std::vector<Material> materials;
+	std::vector<tinyobj::material_t> tinyObjMaterialsPruned; //get rid of duplicates
 	std::unordered_map<std::pair<std::string, int>, Texture, //texture name & desiredChannels is key
 		PairHash<std::string, int>,
 		PairPred<std::string, int>> textures;
@@ -839,11 +850,11 @@ void loadMeshJob(void* jobArgs) {
 	unsigned char* meshletTriangles = new unsigned char[MESHLET_MAX_INDICES * maxMeshlets];
 
 	bool hasMaterials = false;
+	uint32_t numMaterials = 0;
 	tinyobj::material_t currentMaterial;
-	if (!materials.empty()) {
+	if (!tinyObjMaterials.empty()) {
 		hasMaterials = true;
-		currentMaterial = materials.at(shapes[0].mesh.material_ids[0]);
-		meshMaterials.push_back(currentMaterial);
+		currentMaterial = tinyObjMaterials.at(shapes[0].mesh.material_ids[0]);
 		Texture texture;
 		if (!currentMaterial.diffuse_texname.empty()) {
 			texture.typeBits |= TEXTURE_DIFFUSE_BIT;
@@ -859,7 +870,16 @@ void loadMeshJob(void* jobArgs) {
 				it->second.typeBits |= TEXTURE_SPECULAR_BIT; //texture can be used as both diffuse and specular
 			}
 		}
+		Material material;
+		material.diffuseColor = glm::vec4(currentMaterial.diffuse[0], currentMaterial.diffuse[1],
+			currentMaterial.diffuse[2], 1.0f);
+		material.specularColor = glm::vec4(currentMaterial.specular[0], currentMaterial.specular[1],
+			currentMaterial.specular[2], 1.0f);
+		materials.push_back(material);
+		tinyObjMaterialsPruned.push_back(currentMaterial);
+		numMaterials++;
 	}
+
 	for (const tinyobj::shape_t& shape : shapes) {
 		const tinyobj::mesh_t& mesh = shape.mesh;
 		size_t indexOffset = 0;
@@ -869,42 +889,51 @@ void loadMeshJob(void* jobArgs) {
 			Vertex faceVertices[3];
 			if (hasMaterials) {
 				int materialID = mesh.material_ids[f];
-				const tinyobj::material_t& material = materials.at(materialID);
-				materialsEquivalent = materialsEquivalent && (material.diffuse_texname == currentMaterial.diffuse_texname);
-				materialsEquivalent = materialsEquivalent && (material.specular_texname == currentMaterial.specular_texname);
-				materialsEquivalent = materialsEquivalent && (material.diffuse[0] == currentMaterial.diffuse[0]) &&
-					(material.diffuse[1] == currentMaterial.diffuse[1]) &&
-					(material.diffuse[2] == currentMaterial.diffuse[2]);
-				materialsEquivalent = materialsEquivalent && (material.specular[0] == currentMaterial.specular[0]) &&
-					(material.specular[1] == currentMaterial.specular[1]) &&
-					(material.specular[2] == currentMaterial.specular[2]);
-				if (!materialsEquivalent) { //ensure that each mesh has unique material
-					meshIndex++;
-					unindexedMeshVertices.push_back(std::vector<Vertex>());
-					currentMaterial = material;
-					meshMaterials.push_back(currentMaterial);
-					Texture texture;
-					if (!currentMaterial.diffuse_texname.empty()) {
-						auto it = textures.find(std::make_pair(currentMaterial.diffuse_texname, 4));
-						if (it == textures.end()) {
-							texture.typeBits |= TEXTURE_DIFFUSE_BIT;
-							textures.emplace(std::make_pair(currentMaterial.diffuse_texname, 4), texture);
-						}
-						else {
-							it->second.typeBits |= TEXTURE_DIFFUSE_BIT;
-						}
+				const tinyobj::material_t& tinyObjMaterial = tinyObjMaterials.at(materialID);
+				Texture texture;
+				if (!tinyObjMaterial.diffuse_texname.empty()) {
+					auto it = textures.find(std::make_pair(tinyObjMaterial.diffuse_texname, 4));
+					if (it == textures.end()) {
+						texture.typeBits |= TEXTURE_DIFFUSE_BIT;
+						textures.emplace(std::make_pair(tinyObjMaterial.diffuse_texname, 4), texture);
 					}
-					if (!currentMaterial.specular_texname.empty()) {
-						auto it = textures.find(std::make_pair(currentMaterial.specular_texname, 4));
-						if (it == textures.end()) {
-							texture.typeBits |= TEXTURE_SPECULAR_BIT;
-							textures.emplace(std::make_pair(currentMaterial.specular_texname, 4), texture);
-						}
-						else {
-							it->second.typeBits |= TEXTURE_SPECULAR_BIT;
-						}
+					else {
+						it->second.typeBits |= TEXTURE_DIFFUSE_BIT;
 					}
 				}
+				if (!tinyObjMaterial.specular_texname.empty()) {
+					auto it = textures.find(std::make_pair(tinyObjMaterial.specular_texname, 4));
+					if (it == textures.end()) {
+						texture.typeBits |= TEXTURE_SPECULAR_BIT;
+						textures.emplace(std::make_pair(tinyObjMaterial.specular_texname, 4), texture);
+					}
+					else {
+						it->second.typeBits |= TEXTURE_SPECULAR_BIT;
+					}
+				}
+				materialsEquivalent = materialsEquivalent && (tinyObjMaterial.diffuse_texname == currentMaterial.diffuse_texname);
+				materialsEquivalent = materialsEquivalent && (tinyObjMaterial.specular_texname == currentMaterial.specular_texname);
+				materialsEquivalent = materialsEquivalent && (tinyObjMaterial.diffuse[0] == currentMaterial.diffuse[0])
+					&& (tinyObjMaterial.diffuse[1] == currentMaterial.diffuse[1])
+					&& (tinyObjMaterial.diffuse[2] == currentMaterial.diffuse[2]);
+				materialsEquivalent = materialsEquivalent && (tinyObjMaterial.specular[0] == currentMaterial.specular[0])
+					&& (tinyObjMaterial.specular[1] == currentMaterial.specular[1])
+					&& (tinyObjMaterial.specular[2] == currentMaterial.specular[2]);
+				if (!materialsEquivalent) {
+					assert(numMaterials >= 1);
+					Material material;
+					material.diffuseColor = glm::vec4(tinyObjMaterial.diffuse[0], tinyObjMaterial.diffuse[1],
+						tinyObjMaterial.diffuse[2], tinyObjMaterial.diffuse[3]);
+					material.specularColor = glm::vec4(tinyObjMaterial.specular[0], tinyObjMaterial.specular[1],
+						tinyObjMaterial.specular[2], tinyObjMaterial.specular[3]);
+					materials.push_back(material);
+					tinyObjMaterialsPruned.push_back(tinyObjMaterial);
+					numMaterials++;
+				}
+				faceVertices[0].materialIndex = numMaterials - 1;
+				faceVertices[1].materialIndex = numMaterials - 1;
+				faceVertices[2].materialIndex = numMaterials - 1;
+				currentMaterial = tinyObjMaterial;
 			}
 			for (int v = 0; v < 3; v++) {
 				tinyobj::index_t idx = mesh.indices[indexOffset + v];
@@ -929,7 +958,9 @@ void loadMeshJob(void* jobArgs) {
 					vertex.texCoord.y = attrib.texcoords[2 * size_t(idx.texcoord_index) + 1];
 				}
 
-				faceVertices[v] = vertex;
+				faceVertices[v].pos = vertex.pos;
+				faceVertices[v].normal = vertex.normal;
+				faceVertices[v].texCoord = vertex.texCoord;
 			}
 			if (useFaceNormal) {
 				glm::vec3 v1 = faceVertices[1].pos - faceVertices[0].pos;
@@ -940,15 +971,15 @@ void loadMeshJob(void* jobArgs) {
 				faceVertices[1].normal = glm::vec4(faceNormal, 0.0f);
 				faceVertices[2].normal = glm::vec4(faceNormal, 0.0f);
 			}
-			unindexedMeshVertices.at(meshIndex).push_back(faceVertices[0]);
-			unindexedMeshVertices.at(meshIndex).push_back(faceVertices[1]);
-			unindexedMeshVertices.at(meshIndex).push_back(faceVertices[2]);
+			unindexedVertices.push_back(faceVertices[0]);
+			unindexedVertices.push_back(faceVertices[1]);
+			unindexedVertices.push_back(faceVertices[2]);
 			indexOffset += 3;
 		}
 	}
+	assert(materials.size() == tinyObjMaterialsPruned.size());
 
 	if (hasMaterials) {
-		assert(unindexedMeshVertices.size() == meshMaterials.size());
 		size_t numCommandBuffers = textures.size();
 		std::vector<VkCommandBuffer>& commandBuffers = renderer->transferCommandPool.getCommandBuffers(numCommandBuffers+1);
 		uint32_t commandBufferIndex = 1;
@@ -973,7 +1004,8 @@ void loadMeshJob(void* jobArgs) {
 				assert(texture.image != VK_NULL_HANDLE);
 				assert(texture.imageView != VK_NULL_HANDLE);
 				assert(texture.sampler != VK_NULL_HANDLE);
-				texture.arrayIndex = renderer->textureIndexPool.getTextureIndex();
+				int32_t index = renderer->textureIndexPool.getTextureIndex();
+				texture.arrayIndex = index;
 				mesh->textures.push_back(texture);
 			}
 			else {
@@ -984,144 +1016,123 @@ void loadMeshJob(void* jobArgs) {
 		}
 	}
 	assert(mesh->textures.size() == textures.size());
-
-	uint32_t vertexBufferOffset = 0;
-	for (int m = 0; m < unindexedMeshVertices.size(); m++) {
-		std::vector<Vertex>& unindexedVertices = unindexedMeshVertices.at(m);
-		size_t indexCount = unindexedVertices.size();
-		meshRemaps.push_back(std::vector<uint32_t>());
-		meshVertices.push_back(std::vector<Vertex>());
-		meshIndices.push_back(std::vector<uint32_t>());
-		meshRemaps.at(m).resize(indexCount);
-		size_t vertexCount = meshopt_generateVertexRemap(meshRemaps.at(m).data(), nullptr, indexCount,
-			unindexedVertices.data(), indexCount, sizeof(Vertex));
-		meshIndices.at(m).resize(indexCount);
-		meshVertices.at(m).resize(vertexCount);
-		meshopt_remapIndexBuffer(meshIndices.at(m).data(), nullptr, indexCount, meshRemaps.at(m).data());
-		meshopt_remapVertexBuffer(meshVertices.at(m).data(), unindexedVertices.data(), indexCount, sizeof(Vertex), meshRemaps.at(m).data());
-
-		uint32_t numMeshletsGenerated = meshopt_buildMeshlets(meshOptMeshlets, meshletVertices, meshletTriangles,
-			meshIndices.at(m).data(), static_cast<uint32_t>(indexCount), &(meshVertices.at(m)[0].pos.x),
-			static_cast<uint32_t>(vertexCount), sizeof(Vertex), MESHLET_MAX_VERTICES, MESHLET_MAX_INDICES / 3, 0.0f);
-		tinyobj::material_t material;
-		if (hasMaterials) material = meshMaterials.at(m);
-		const meshopt_Meshlet& last = meshOptMeshlets[numMeshletsGenerated - 1];
-		uint32_t numMeshletVertices = last.vertex_offset + last.vertex_count;
-		uint32_t numMeshletTriangles = last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3);
-		for (uint32_t i = 0; i < numMeshletsGenerated && i < maxMeshlets; i++) {
-			meshopt_Meshlet& meshOptMeshlet = meshOptMeshlets[i];
-			Meshlet meshlet;
-			MeshletInfo meshletInfo;
-			if (hasMaterials) {
-				meshlet.diffuseColor = glm::vec4{ material.diffuse[0], material.diffuse[1], material.diffuse[2], 1.0 };
-				meshlet.specularColor = glm::vec4{ material.specular[0], material.specular[1], material.specular[2], 1.0 };
-				if (!material.diffuse_texname.empty()) {
-					auto it = textures.find(std::make_pair(material.diffuse_texname, 4));
-					assert(it != textures.end());
-					assert((it->second.typeBits & TEXTURE_DIFFUSE_BIT) != 0);
-					meshlet.diffuseIndex = it->second.arrayIndex;
-				}
-				if (!material.specular_texname.empty()) {
-					auto it = textures.find(std::make_pair(material.specular_texname, 4));
-					assert(it != textures.end());
-					assert((it->second.typeBits & TEXTURE_SPECULAR_BIT) != 0);
-					meshlet.specularIndex = it->second.arrayIndex;
-				}
-			}
-			assert(meshOptMeshlet.vertex_count <= MESHLET_MAX_VERTICES);
-			assert(meshOptMeshlet.triangle_count <= MESHLET_MAX_INDICES / 3);
-			meshlet.vertexCount = meshOptMeshlet.vertex_count;
-			meshlet.indexCount = meshOptMeshlet.triangle_count * 3;
-			for (uint32_t j = 0; j < meshlet.vertexCount; j++) {
-				uint32_t vertexIndex = j + meshOptMeshlet.vertex_offset;
-				assert(vertexIndex < numMeshletVertices);
-				meshlet.vertices[j] = meshletVertices[vertexIndex] + vertexBufferOffset;
-			}
-			for (uint32_t j = 0; j < meshOptMeshlet.triangle_count; j++) {
-				assert((meshOptMeshlet.triangle_offset + 3 * j + 2) < numMeshletTriangles);
-				meshlet.indices[3 * j] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j];
-				meshlet.indices[3 * j + 1] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j + 1];
-				meshlet.indices[3 * j + 2] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j + 2];
-			}
-			glm::vec3 min, max, median;
-			glm::vec3 corners[8];
-			uint32_t index = meshlet.indices[0];
-			uint32_t vertexIndex = meshlet.vertices[index] - vertexBufferOffset;
-			Vertex vertex = meshVertices.at(m).at(vertexIndex);
-			min.x = vertex.pos.x;
-			min.y = vertex.pos.y;
-			min.z = vertex.pos.z;
-			max.x = vertex.pos.x;
-			max.y = vertex.pos.y;
-			max.z = vertex.pos.z;
-			for (uint32_t j = 1; j < meshlet.indexCount; j++) {
-				index = meshlet.indices[j];
-				vertexIndex = meshlet.vertices[index] - vertexBufferOffset;
-				vertex = meshVertices.at(m).at(vertexIndex);
-				min.x = std::min(min.x, vertex.pos.x);
-				min.y = std::min(min.y, vertex.pos.y);
-				min.z = std::min(min.z, vertex.pos.z);
-				max.x = std::max(max.x, vertex.pos.x);
-				max.y = std::max(max.y, vertex.pos.y);
-				max.z = std::max(max.z, vertex.pos.z);
-			}
-			median = (max + min) / 2.0f;
-
-			corners[0] = max;
-			corners[1] = glm::vec3(min.x, max.y, max.z);
-			corners[2] = glm::vec3(min.x, max.y, min.z);
-			corners[3] = glm::vec3(max.x, max.y, min.z);
-			corners[4] = glm::vec3(max.x, min.y, max.z);
-			corners[5] = glm::vec3(min.x, min.y, max.z);
-			corners[6] = glm::vec3(max.x, min.y, min.z);
-			corners[7] = min;
-			float distSq;
-			glm::vec3 disp = corners[0] - median;
-			distSq = glm::dot(disp, disp);
-			for (int j = 1; j < 8; j++) {
-				disp = corners[j] - median;
-				distSq = std::max(distSq, glm::dot(disp, disp));
-			}
-			//meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshletVertices[meshOptMeshlet.vertex_offset],
-			//	&meshletTriangles[meshOptMeshlet.triangle_offset],
-			//	meshOptMeshlet.triangle_count, &(meshVertices.at(m)[0].pos.x), meshVertices.at(m).size(), sizeof(Vertex));
-			meshletInfo.boundingSphere = glm::vec4(median.x, median.y, median.z, std::sqrt(distSq) + 0.0001f);
-			//meshletInfo.boundingSphere = glm::vec4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
-			assert(meshletInfo.boundingSphere != glm::vec4(0.0f));
-			#ifndef NDEBUG
-			for (uint32_t j = 0; j < meshlet.indexCount; j++) {
-				index = meshlet.indices[j];
-				vertexIndex = meshlet.vertices[index] - vertexBufferOffset;
-				vertex = meshVertices.at(m).at(vertexIndex);
-				assert(pointInSphere(meshletInfo.boundingSphere, vertex.pos));
-			}
-			#endif // !NDEBUG
-			meshlets.push_back(meshlet);
-			meshletInfos.push_back(meshletInfo);
-			
+	for (int i = 0; i < materials.size(); i++) {
+		Material& material = materials.at(i);
+		tinyobj::material_t tinyObjMaterial = tinyObjMaterialsPruned.at(i);
+		if (!tinyObjMaterial.diffuse_texname.empty()) {
+			auto diffuseKey = std::make_pair(tinyObjMaterial.diffuse_texname, 4);
+			Texture& texture = textures.at(diffuseKey);
+			material.diffuseIndex = texture.arrayIndex;
 		}
-		mesh->numMeshlets += numMeshletsGenerated;
-		vertexBufferOffset += static_cast<uint32_t>(vertexCount);
+		if (!tinyObjMaterial.specular_texname.empty()) {
+			auto specularKey = std::make_pair(tinyObjMaterial.specular_texname, 4);
+			Texture& texture = textures.at(specularKey);
+			material.specularIndex = texture.arrayIndex;
+		}
 	}
+
+	size_t indexCount = unindexedVertices.size();
+	remap.resize(indexCount);
+	size_t vertexCount = meshopt_generateVertexRemap(remap.data(), nullptr, indexCount,
+		unindexedVertices.data(), indexCount, sizeof(Vertex));
+	indices.resize(indexCount);
+	vertices.resize(vertexCount);
+	meshopt_remapIndexBuffer(indices.data(), nullptr, indexCount, remap.data());
+	meshopt_remapVertexBuffer(vertices.data(), unindexedVertices.data(), indexCount, sizeof(Vertex), remap.data());
+
+	uint32_t numMeshletsGenerated = meshopt_buildMeshlets(meshOptMeshlets, meshletVertices, meshletTriangles,
+		indices.data(), static_cast<uint32_t>(indexCount), &(vertices[0].pos.x),
+		static_cast<uint32_t>(vertexCount), sizeof(Vertex), MESHLET_MAX_VERTICES, MESHLET_MAX_INDICES / 3, 0.0f);
+	tinyobj::material_t material;
+	const meshopt_Meshlet& last = meshOptMeshlets[numMeshletsGenerated - 1];
+	uint32_t numMeshletVertices = last.vertex_offset + last.vertex_count;
+	uint32_t numMeshletTriangles = last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3);
+	for (uint32_t i = 0; i < numMeshletsGenerated && i < maxMeshlets; i++) {
+		meshopt_Meshlet& meshOptMeshlet = meshOptMeshlets[i];
+		Meshlet meshlet;
+		assert(meshOptMeshlet.vertex_count <= MESHLET_MAX_VERTICES);
+		assert(meshOptMeshlet.triangle_count <= MESHLET_MAX_INDICES / 3);
+		meshlet.vertexCount = meshOptMeshlet.vertex_count;
+		meshlet.indexCount = meshOptMeshlet.triangle_count * 3;
+		for (uint32_t j = 0; j < meshlet.vertexCount; j++) {
+			uint32_t vertexIndex = j + meshOptMeshlet.vertex_offset;
+			assert(vertexIndex < numMeshletVertices);
+			meshlet.vertices[j] = meshletVertices[vertexIndex];
+		}
+		for (uint32_t j = 0; j < meshOptMeshlet.triangle_count; j++) {
+			assert((meshOptMeshlet.triangle_offset + 3 * j + 2) < numMeshletTriangles);
+			meshlet.indices[3 * j] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j];
+			meshlet.indices[3 * j + 1] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j + 1];
+			meshlet.indices[3 * j + 2] = meshletTriangles[meshOptMeshlet.triangle_offset + 3 * j + 2];
+		}
+		glm::vec3 min, max, median;
+		glm::vec3 corners[8];
+		uint32_t index = meshlet.indices[0];
+		uint32_t vertexIndex = meshlet.vertices[index];
+		Vertex vertex = vertices.at(vertexIndex);
+		min.x = vertex.pos.x;
+		min.y = vertex.pos.y;
+		min.z = vertex.pos.z;
+		max.x = vertex.pos.x;
+		max.y = vertex.pos.y;
+		max.z = vertex.pos.z;
+		for (uint32_t j = 1; j < meshlet.indexCount; j++) {
+			index = meshlet.indices[j];
+			vertexIndex = meshlet.vertices[index];
+			vertex = vertices.at(vertexIndex);
+			min.x = std::min(min.x, vertex.pos.x);
+			min.y = std::min(min.y, vertex.pos.y);
+			min.z = std::min(min.z, vertex.pos.z);
+			max.x = std::max(max.x, vertex.pos.x);
+			max.y = std::max(max.y, vertex.pos.y);
+			max.z = std::max(max.z, vertex.pos.z);
+		}
+		median = (max + min) / 2.0f;
+
+		corners[0] = max;
+		corners[1] = glm::vec3(min.x, max.y, max.z);
+		corners[2] = glm::vec3(min.x, max.y, min.z);
+		corners[3] = glm::vec3(max.x, max.y, min.z);
+		corners[4] = glm::vec3(max.x, min.y, max.z);
+		corners[5] = glm::vec3(min.x, min.y, max.z);
+		corners[6] = glm::vec3(max.x, min.y, min.z);
+		corners[7] = min;
+		float distSq;
+		glm::vec3 disp = corners[0] - median;
+		distSq = glm::dot(disp, disp);
+		for (int j = 1; j < 8; j++) {
+			disp = corners[j] - median;
+			distSq = std::max(distSq, glm::dot(disp, disp));
+		}
+		//meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshletVertices[meshOptMeshlet.vertex_offset],
+		//	&meshletTriangles[meshOptMeshlet.triangle_offset],
+		//	meshOptMeshlet.triangle_count, &(meshVertices.at(m)[0].pos.x), meshVertices.at(m).size(), sizeof(Vertex));
+		meshlet.boundingSphere = glm::vec4(median.x, median.y, median.z, std::sqrt(distSq) + 0.0001f);
+		//meshletInfo.boundingSphere = glm::vec4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
+		assert(meshlet.boundingSphere != glm::vec4(0.0f));
+		#ifndef NDEBUG
+		for (uint32_t j = 0; j < meshlet.indexCount; j++) {
+			index = meshlet.indices[j];
+			vertexIndex = meshlet.vertices[index];
+			vertex = vertices.at(vertexIndex);
+			assert(pointInSphere(meshlet.boundingSphere, vertex.pos));
+		}
+		#endif // !NDEBUG
+		meshlets.push_back(meshlet);
+			
+	}
+	mesh->numMeshlets = numMeshletsGenerated;
 	
 	delete[] meshOptMeshlets;
 	delete[] meshletVertices;
 	delete[] meshletTriangles;
 
-	std::vector<Vertex> outVertices;
-	for (std::vector<Vertex>& vertices : meshVertices) {
-		for (Vertex& vertex : vertices) {
-			outVertices.push_back(vertex);
-		}
-	}
-	assert(meshletInfos.size() == meshlets.size());
-
-	VkBuffer vertexBuffer = VK_NULL_HANDLE, meshletBuffer = VK_NULL_HANDLE, meshletInfoBuffer = VK_NULL_HANDLE;
-	VmaAllocation vertexBufferAllocation = nullptr, meshletBufferAllocation = nullptr, meshletInfoBufferAllocation = nullptr;
+	VkBuffer vertexBuffer = VK_NULL_HANDLE, meshletBuffer = VK_NULL_HANDLE, materialsBuffer = VK_NULL_HANDLE;
+	VmaAllocation vertexBufferAllocation = nullptr, meshletBufferAllocation = nullptr, materialsBufferAllocation = nullptr;
 	VkBufferCreateInfo bufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	bufferCreateInfo.size = outVertices.size() * sizeof(Vertex);
+	bufferCreateInfo.size = vertices.size() * sizeof(Vertex);
 	VmaAllocationCreateInfo bufferAllocInfo{};
 	bufferAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 	VK_CHECK(vmaCreateBuffer(renderer->allocator, &bufferCreateInfo, &bufferAllocInfo, &vertexBuffer, &vertexBufferAllocation, nullptr));
@@ -1131,15 +1142,17 @@ void loadMeshJob(void* jobArgs) {
 	VK_CHECK(vmaCreateBuffer(renderer->allocator, &bufferCreateInfo, &bufferAllocInfo, &meshletBuffer, &meshletBufferAllocation, nullptr));
 	mesh->meshletBuffer = meshletBuffer;
 	mesh->meshletBufferAllocation = meshletBufferAllocation;
-	bufferCreateInfo.size = sizeof(MeshletInfo) * meshletInfos.size();
-	VK_CHECK(vmaCreateBuffer(renderer->allocator, &bufferCreateInfo, &bufferAllocInfo, 
-		&meshletInfoBuffer, &meshletInfoBufferAllocation, nullptr));
-	mesh->meshletInfoBuffer = meshletInfoBuffer;
-	mesh->meshletInfoBufferAllocation = meshletInfoBufferAllocation;
+	bufferCreateInfo.size = sizeof(Material) * materials.size();
+	if (hasMaterials) {
+		VK_CHECK(vmaCreateBuffer(renderer->allocator, &bufferCreateInfo, &bufferAllocInfo,
+			&materialsBuffer, &materialsBufferAllocation, nullptr));
+	}
+	mesh->materialsBuffer = materialsBuffer;
+	mesh->materialsBufferAllocation = materialsBufferAllocation;
 
-	renderer->stageBuffer(outVertices.data(), outVertices.size()*sizeof(Vertex), mesh->vertexBuffer, mesh->vertexBufferAllocation);
+	renderer->stageBuffer(vertices.data(), vertices.size()*sizeof(Vertex), mesh->vertexBuffer, mesh->vertexBufferAllocation);
 	renderer->stageBuffer(meshlets.data(), sizeof(Meshlet) * meshlets.size(), mesh->meshletBuffer, mesh->meshletBufferAllocation);
-	renderer->stageBuffer(meshletInfos.data(), sizeof(MeshletInfo)* meshletInfos.size(), mesh->meshletInfoBuffer, mesh->meshletInfoBufferAllocation);
+	if (hasMaterials) renderer->stageBuffer(materials.data(), sizeof(Material)* materials.size(), mesh->materialsBuffer, mesh->materialsBufferAllocation);
 	renderer->uploadResources();
 	renderer->finalizeResourceUpload();
 
@@ -1450,10 +1463,10 @@ void VulkanRenderer::createDescriptorLayouts() {
 	defaultPipelineLayoutInfo.pSetLayouts = setLayouts;
 	VkPushConstantRange pushConstants[2];
 	pushConstants[0].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
-	pushConstants[0].size = sizeof(useCulling);
+	pushConstants[0].size = sizeof(useFrustumCulling);
 	pushConstants[0].offset = 0;
 	pushConstants[1].stageFlags = VK_SHADER_STAGE_TASK_BIT_EXT;
-	pushConstants[1].size = sizeof(useCulling) + 2*sizeof(uint32_t);
+	pushConstants[1].size = sizeof(useFrustumCulling) + 2*sizeof(uint32_t);
 	pushConstants[1].offset = 0;
 	defaultPipelineLayoutInfo.pushConstantRangeCount = 2;
 	defaultPipelineLayoutInfo.pPushConstantRanges = pushConstants;
@@ -1797,9 +1810,9 @@ bool VulkanRenderer::loadImage(VkCommandBuffer commandBuffer, std::string path, 
 		VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
 		samplerInfo.magFilter = VK_FILTER_LINEAR;
 		samplerInfo.minFilter = VK_FILTER_LINEAR;
-		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		samplerInfo.anisotropyEnable = VK_TRUE;
 		samplerInfo.maxAnisotropy = physicalDevice.properties.limits.maxSamplerAnisotropy;
 		samplerInfo.unnormalizedCoordinates = VK_FALSE;
@@ -2019,8 +2032,8 @@ void VulkanRenderer::updateDynamicBuffer(DynamicBufferUploadJobArgs jobArgs) {
 
 void VulkanRenderer::uploadTestCube() {
 	Mesh* mesh = new Mesh();
-	VkBuffer vertexBuffer = VK_NULL_HANDLE, meshletBuffer = VK_NULL_HANDLE, meshletInfoBuffer = VK_NULL_HANDLE;
-	VmaAllocation vertexBufferAllocation = nullptr, meshletBufferAllocation = nullptr, meshletInfoBufferAllocation = nullptr;
+	VkBuffer vertexBuffer = VK_NULL_HANDLE, meshletBuffer = VK_NULL_HANDLE;
+	VmaAllocation vertexBufferAllocation = nullptr, meshletBufferAllocation = nullptr;
 	VkBufferCreateInfo bufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -2034,10 +2047,6 @@ void VulkanRenderer::uploadTestCube() {
 	VK_CHECK(vmaCreateBuffer(allocator, &bufferCreateInfo, &bufferAllocInfo, &meshletBuffer, &meshletBufferAllocation, nullptr));
 	mesh->meshletBuffer = meshletBuffer;
 	mesh->meshletBufferAllocation = meshletBufferAllocation;
-	bufferCreateInfo.size = sizeof(MeshletInfo);
-	VK_CHECK(vmaCreateBuffer(allocator, &bufferCreateInfo, &bufferAllocInfo, &meshletInfoBuffer, &meshletInfoBufferAllocation, nullptr));
-	mesh->meshletInfoBuffer = meshletInfoBuffer;
-	mesh->meshletInfoBufferAllocation = meshletInfoBufferAllocation;
 	pendingMeshes.push_back(mesh);
 	
 	Job uploadTestCubeJob{};
@@ -2072,8 +2081,6 @@ void VulkanRenderer::uploadTestCube() {
 			meshlet.indices[i] = 0;
 		}
 		stageBuffer(&meshlet, sizeof(meshlet), mesh->meshletBuffer, mesh->meshletBufferAllocation);
-		MeshletInfo meshletInfo{};
-		stageBuffer(&meshletInfo, sizeof(meshletInfo), mesh->meshletInfoBuffer, mesh->meshletInfoBufferAllocation);
 		uploadResources();
 		finalizeResourceUpload();
 	};

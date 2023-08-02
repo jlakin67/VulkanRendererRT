@@ -31,23 +31,28 @@ struct Vertex {
 	glm::vec4 pos{0.0f};
 	glm::vec4 normal{ 0.0f };
 	glm::vec2 texCoord{ 0.0f };
-	glm::vec2 pad{ 0.0f };
+	int32_t materialIndex = -1;
+	int32_t pad = 0;
+};
+
+struct Material {
+	glm::vec4 diffuseColor{ 1.0f, 0.0f, 0.0f, 1.0f };
+	glm::vec4 specularColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+	int32_t diffuseIndex = -1; //index into bindless buffer
+	int32_t specularIndex = -1; //index into bindless buffer
+	int32_t pad1 = 0;
+	int32_t pad2 = 0;
 };
 
 struct Meshlet
 {
+	glm::vec4 boundingSphere{ 0.0f, 0.0f, 0.0f, 0.5f };
 	uint32_t vertexCount = 0;
 	uint32_t indexCount = 0;
-	int32_t diffuseIndex = -1; //index into bindless buffer
-	int32_t specularIndex = -1; //index into bindless buffer
-	glm::vec4 diffuseColor{ 1.0f, 0.0f, 0.0f, 1.0f };
-	glm::vec4 specularColor{ 1.0f, 1.0f, 1.0f, 1.0f };
 	uint32_t vertices[MESHLET_MAX_VERTICES];
 	uint32_t indices[MESHLET_MAX_INDICES]; // 32 triangles
-};
-
-struct MeshletInfo {
-	glm::vec4 boundingSphere{ 0.0f, 0.0f, 0.0f, 0.5f }; //center, radius
+	uint32_t pad1 = 0;
+	uint32_t pad2 = 0;
 };
 
 constexpr const uint32_t TEXTURE_DIFFUSE_BIT = 1 << 0;
@@ -79,8 +84,8 @@ struct Mesh {
 	VmaAllocation vertexBufferAllocation = nullptr;
 	VkBuffer meshletBuffer = VK_NULL_HANDLE;
 	VmaAllocation meshletBufferAllocation = nullptr;
-	VkBuffer meshletInfoBuffer = VK_NULL_HANDLE;
-	VmaAllocation meshletInfoBufferAllocation = nullptr;
+	VkBuffer materialsBuffer = VK_NULL_HANDLE;
+	VmaAllocation materialsBufferAllocation = nullptr;
 	std::vector<Texture> textures;
 	VkBuffer modelMatrixBuffers[FRAME_QUEUE_LENGTH];
 	VmaAllocation modelMatrixBufferAllocations[FRAME_QUEUE_LENGTH];
@@ -91,7 +96,7 @@ struct Mesh {
 	void destroy(VkDevice device, VmaAllocator allocator, TextureIndexPool& indexPool) {
 		vmaDestroyBuffer(allocator, vertexBuffer, vertexBufferAllocation);
 		vmaDestroyBuffer(allocator, meshletBuffer, meshletBufferAllocation);
-		vmaDestroyBuffer(allocator, meshletInfoBuffer, meshletInfoBufferAllocation);
+		vmaDestroyBuffer(allocator, materialsBuffer, materialsBufferAllocation);
 		for (Texture& texture : textures) {
 			indexPool.freeTextureIndex(texture.arrayIndex);
 			vkDestroyImageView(device, texture.imageView, nullptr);
@@ -384,5 +389,5 @@ private:
 	uint8_t currentFrame = 0;
 	uint64_t numFramesProcessed = 0;
 
-	VkBool32 useCulling = VK_TRUE;
+	VkBool32 useFrustumCulling = VK_TRUE;
 };

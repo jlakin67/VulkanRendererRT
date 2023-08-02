@@ -39,10 +39,10 @@ layout (std430, set = 2, binding = 2) readonly buffer MeshletBuffer
   Meshlet meshlets[];
 } meshletBuffer;
 
-layout (std430, set = 2, binding = 3) readonly buffer MeshletInfoBuffer
+layout (std430, set = 2, binding = 3) readonly buffer MaterialsBuffer
 {
-  MeshletInfo meshletInfos[];
-} meshletInfos;
+  Material materials[]; //index by triangle ID
+} materialsBuffer;
 
 
 taskPayloadSharedEXT Payload payload;
@@ -69,21 +69,31 @@ void main() {
 		meshletID = payload.baseID + payload.subIDs[gl_WorkGroupID.x];
 	} else meshletID = gl_WorkGroupID.x;
 	Meshlet meshlet = meshletBuffer.meshlets[meshletID];
-	MeshletInfo meshletInfo = meshletInfos.meshletInfos[meshletID];
 	uint vertexID = gl_LocalInvocationID.x;
 	uint primitiveID = gl_LocalInvocationID.x;
 	uint primitiveCount = meshlet.indexCount / 3;
 	SetMeshOutputsEXT(meshlet.vertexCount, primitiveCount);
 	if (vertexID < meshlet.vertexCount) {
 		uint vertexIndex = meshlet.vertices[vertexID];
-		vec4 worldPos = model * vertexBuffer.vertices[vertexIndex].position;
+		Vertex vertex = vertexBuffer.vertices[vertexIndex];
+		int materialIndex = vertex.materialIndex;
+		Material material;
+		if (materialIndex >= 0)
+			material = materialsBuffer.materials[materialIndex];
+		else {			
+			material.diffuseIndex = -1;
+			material.specularIndex = -1;
+			material.diffuseColor = vec4(1.0f, 0.0f, 0.0f, 1.0f);
+			material.specularColor = vec4(1.0f, 1.0f, 1.0f, 1.0f);
+		}
+		vec4 worldPos = model * vertex.position;
 		v_out[vertexID].pos = worldPos.xyz;
-		v_out[vertexID].normal = (invTranspose * vertexBuffer.vertices[vertexIndex].normal).xyz;
-		v_out[vertexID].texCoord = vertexBuffer.vertices[vertexIndex].texCoord;
-		v_out[vertexID].diffuseIndex = meshlet.diffuseIndex;
-		v_out[vertexID].specularIndex = meshlet.specularIndex;
-		v_out[vertexID].diffuseColor = meshlet.diffuseColor;
-		v_out[vertexID].specularColor = meshlet.specularColor;
+		v_out[vertexID].normal = (invTranspose * vertex.normal).xyz;
+		v_out[vertexID].texCoord = vertex.texCoord;
+		v_out[vertexID].diffuseIndex = material.diffuseIndex;
+		v_out[vertexID].specularIndex = material.specularIndex;
+		v_out[vertexID].diffuseColor = material.diffuseColor;
+		v_out[vertexID].specularColor = material.specularColor;
 		/*
 		vec3 c = meshletInfo.boundingSphere.xyz;
 		float radius = meshletInfo.boundingSphere.w;
@@ -110,7 +120,6 @@ void main() {
 		//bool render = intersect(aabb, vec4(-1.0f, -1.0f, 1.0f, 1.0f));
 		//if (render) v_out[vertexID].diffuseColor = vec4(1.0f, 0.0f, 0.0f, 1.0f);
 		//else v_out[vertexID].diffuseColor = vec4(0.0f, 1.0f, 0.0f, 1.0f);
-		v_out[vertexID].diffuseColor = meshlet.diffuseColor;
 		gl_MeshVerticesEXT[vertexID].gl_Position = transforms.projection * transforms.view * worldPos;
 	}
 	if (primitiveID < primitiveCount) {
